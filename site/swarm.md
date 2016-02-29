@@ -35,7 +35,7 @@ details.  Here we'll create a modest cluster of two VMs (replacing
 driver](https://docs.docker.com/machine/drivers/) you wish to use):
 
 ```sh
-$ cluster_id=$(docker run --rm swarm create)
+$ cluster_id=$(curl -s -XPOST https://discovery.hub.docker.com/v1/clusters)
 $ docker-machine create -d $driver --swarm --swarm-master \
         --swarm-discovery token://$cluster_id swarm-master
 Running pre-create checks...
