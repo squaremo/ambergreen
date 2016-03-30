@@ -31,22 +31,44 @@ type ServiceInfo struct {
 
 type Store interface {
 	Cluster
+	Pinger
+	ServiceDefiner
+	InstanceDefiner
+	ServiceQueryer
+}
 
+type Pinger interface {
 	Ping() error
+}
 
+type ServiceDefiner interface {
 	CheckRegisteredService(serviceName string) error
 	AddService(name string, service data.Service) error
 	RemoveService(serviceName string) error
 	RemoveAllServices() error
-
-	GetService(serviceName string, opts QueryServiceOptions) (*ServiceInfo, error)
-	GetAllServices(opts QueryServiceOptions) ([]*ServiceInfo, error)
-
 	SetContainerRule(serviceName string, ruleName string, spec data.ContainerRule) error
 	RemoveContainerRule(serviceName string, ruleName string) error
+}
 
+type InstanceDefiner interface {
 	AddInstance(serviceName, instanceName string, details data.Instance) error
 	RemoveInstance(serviceName, instanceName string) error
+}
 
+type ServiceQueryer interface {
+	GetService(serviceName string, opts QueryServiceOptions) (*ServiceInfo, error)
+	GetAllServices(opts QueryServiceOptions) ([]*ServiceInfo, error)
 	WatchServices(ctx context.Context, resCh chan<- data.ServiceChange, errorSink daemon.ErrorSink, opts QueryServiceOptions)
 }
+
+// CompositeStore implements Store, and allows different concrete
+// implementations to service different parts of the interface.
+type CompositeStore struct {
+	Cluster
+	Pinger
+	ServiceDefiner
+	InstanceDefiner
+	ServiceQueryer
+}
+
+var _ Store = CompositeStore{}
