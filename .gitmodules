@@ -46,3 +46,39 @@
 [submodule "vendor/golang.org/x/net"]
 	path = vendor/golang.org/x/net
 	url = https://go.googlesource.com/net
+[submodule "vendor/github.com/weaveworks/mesh"]
+	path = vendor/github.com/weaveworks/mesh
+	url = https://github.com/weaveworks/mesh
+[submodule "vendor/github.com/gogo/protobuf"]
+	path = vendor/github.com/gogo/protobuf
+	url = https://github.com/gogo/protobuf
+[submodule "vendor/golang.org/x/crypto"]
+	path = vendor/golang.org/x/crypto
+	url = https://go.googlesource.com/crypto
+[submodule "vendor/google.golang.org/grpc"]
+	path = vendor/google.golang.org/grpc
+	url = https://github.com/grpc/grpc-go
+[submodule "vendor/github.com/ugorji/go"]
+	path = vendor/github.com/ugorji/go
+	url = https://github.com/ugorji/go
+[submodule "vendor/github.com/boltdb/bolt"]
+	path = vendor/github.com/boltdb/bolt
+	url = https://github.com/boltdb/bolt
+[submodule "vendor/github.com/google/btree"]
+	path = vendor/github.com/google/btree
+	url = https://github.com/google/btree
+[submodule "vendor/github.com/coreos/pkg"]
+	path = vendor/github.com/coreos/pkg
+	url = https://github.com/coreos/pkg
+[submodule "vendor/github.com/coreos/go-systemd"]
+	path = vendor/github.com/coreos/go-systemd
+	url = https://github.com/coreos/go-systemd
+[submodule "vendor/github.com/jonboulle/clockwork"]
+	path = vendor/github.com/jonboulle/clockwork
+	url = https://github.com/jonboulle/clockwork
+[submodule "vendor/github.com/coreos/go-semver"]
+	path = vendor/github.com/coreos/go-semver
+	url = https://github.com/coreos/go-semver
+[submodule "vendor/github.com/xiang90/probing"]
+	path = vendor/github.com/xiang90/probing
+	url = https://github.com/xiang90/probing
