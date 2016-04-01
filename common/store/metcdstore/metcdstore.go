@@ -4,20 +4,23 @@ import (
 	"errors"
 	"log"
 
-	wackygrpc "github.com/coreos/etcd/Godeps/_workspace/src/google.golang.org/grpc"
+	"github.com/weaveworks/mesh/metcd"
+	"golang.org/x/net/context"
+
 	"github.com/weaveworks/flux/common/data"
 	"github.com/weaveworks/flux/common/store"
-	"github.com/weaveworks/mesh/metcd"
 )
 
-func New(minPeerCount int, logger *log.Logger) store.ServiceDefiner {
+func New(ctx context.Context, minPeerCount int, logger *log.Logger) store.ServiceDefiner {
 	return &metcdStore{
+		ctx:    ctx,
 		server: metcd.NewDefaultServer(minPeerCount, logger),
 	}
 }
 
 type metcdStore struct {
-	server *wackygrpc.Server
+	ctx    context.Context
+	server metcd.Server
 }
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {
