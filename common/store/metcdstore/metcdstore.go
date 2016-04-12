@@ -20,12 +20,14 @@ func New(ctx context.Context, minPeerCount int, logger *log.Logger) store.Servic
 	return &metcdStore{
 		ctx:    ctx,
 		server: metcd.NewDefaultServer(minPeerCount, terminatec, terminatedc, logger),
+		logger: logger,
 	}
 }
 
 type metcdStore struct {
 	ctx    context.Context
 	server metcd.Server
+	logger *log.Logger
 }
 
 var (
@@ -34,8 +36,10 @@ var (
 )
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {
+	prefix := []byte(serviceRootKey(serviceName))
 	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
-		Key: []byte(serviceRootKey(serviceName)),
+		Key:      prefix,
+		RangeEnd: metcd.PrefixRangeEnd(prefix),
 	})
 	if err != nil {
 		return err
