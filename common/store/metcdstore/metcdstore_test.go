@@ -18,6 +18,11 @@ func TestMetcdStore(t *testing.T) {
 	s := New(context.Background(), 1, logger)
 	time.Sleep(3 * time.Second)
 
+	logger.Printf("CheckRegisteredService")
+	if err := s.CheckRegisteredService("s1"); err == nil {
+		t.Fatal("CheckRegisteredService: want error, have none")
+	}
+
 	logger.Printf("AddService")
 	if err := s.AddService("s1", store.Service{
 		Address:  "1.2.3.4",
@@ -31,5 +36,4 @@ func TestMetcdStore(t *testing.T) {
 	if err := s.CheckRegisteredService("s1"); err != nil {
 		t.Fatalf("CheckRegisteredService: %v", err)
 	}
-
 }
