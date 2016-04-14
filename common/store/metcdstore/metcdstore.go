@@ -3,9 +3,9 @@ package metcdstore
 import (
 	"encoding/json"
 	"errors"
-	"log"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/weaveworks/mesh"
 	"github.com/weaveworks/mesh/metcd"
 	"golang.org/x/net/context"
 
@@ -13,7 +13,7 @@ import (
 )
 
 // New returns a ServiceDefiner backed by a default metcd server.
-func New(ctx context.Context, minPeerCount int, logger *log.Logger) store.ServiceDefiner {
+func New(ctx context.Context, minPeerCount int, logger mesh.Logger) store.ServiceDefiner {
 	// TODO(pb): don't ignore lifecycle management
 	terminatec := make(chan struct{})
 	terminatedc := make(chan error)
@@ -27,7 +27,7 @@ func New(ctx context.Context, minPeerCount int, logger *log.Logger) store.Servic
 type metcdStore struct {
 	ctx    context.Context
 	server metcd.Server
-	logger *log.Logger
+	logger mesh.Logger
 }
 
 var (
