@@ -3,12 +3,14 @@ package metcdstore
 import (
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/weaveworks/mesh"
 	"github.com/weaveworks/mesh/metcd"
 	"golang.org/x/net/context"
 
+	"github.com/weaveworks/flux/common/daemon"
 	"github.com/weaveworks/flux/common/store"
 )
 
@@ -30,10 +32,38 @@ type metcdStore struct {
 	logger mesh.Logger
 }
 
+// ErrNotFound indicates an entity was not found.
+var ErrNotFound = errors.New("not found")
+
+// TODO(pb): remove eventually; just for development
 var (
-	// ErrNotFound indicates an entity was not found.
-	ErrNotFound = errors.New("not found")
+	_ store.Cluster         = &metcdStore{}
+	_ store.Pinger          = &metcdStore{}
+	_ store.ServiceDefiner  = &metcdStore{}
+	_ store.InstanceDefiner = &metcdStore{}
+	_ store.ServiceQueryer  = &metcdStore{}
+	_ store.Store           = &metcdStore{}
 )
+
+func (s *metcdStore) GetHosts() ([]*store.Host, error) {
+	return nil, errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) Heartbeat(identity string, ttl time.Duration, state *store.Host) error {
+	return errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) DeregisterHost(identity string) error {
+	return errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) WatchHosts(ctx context.Context, changes chan<- store.HostChange, errs daemon.ErrorSink) {
+	return // TODO(pb)
+}
+
+func (s *metcdStore) Ping() error {
+	return errors.New("not implemented") // TODO(pb)
+}
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {
 	prefix := []byte(serviceRootKey(serviceName))
@@ -93,4 +123,24 @@ func (s *metcdStore) RemoveContainerRule(serviceName string, ruleName string) er
 		Key: []byte(ruleKey(serviceName, ruleName)),
 	})
 	return err // ignore number of deleted entries
+}
+
+func (s *metcdStore) AddInstance(serviceName, instanceName string, details store.Instance) error {
+	return errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) RemoveInstance(serviceName, instanceName string) error {
+	return errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
+	return nil, errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
+	return nil, errors.New("not implemented") // TODO(pb)
+}
+
+func (s *metcdStore) WatchServices(ctx context.Context, resCh chan<- store.ServiceChange, errorSink daemon.ErrorSink, opts store.QueryServiceOptions) {
+	return // TODO(pb)
 }
