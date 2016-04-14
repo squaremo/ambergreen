@@ -3,6 +3,8 @@ package metcdstore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
@@ -150,11 +152,112 @@ func (s *metcdStore) RemoveInstance(serviceName, instanceName string) error {
 }
 
 func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
-	return nil, errors.New("not implemented") // TODO(pb)
+	key := []byte(serviceRootKey(serviceName))
+	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
+		Key:      key,
+		RangeEnd: metcd.PrefixRangeEnd(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return serviceInfo(resp, opts)
 }
 
 func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
-	return nil, errors.New("not implemented") // TODO(pb)
+	key := []byte(serviceRoot)
+	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
+		Key:      key,
+		RangeEnd: metcd.PrefixRangeEnd(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return serviceInfos(resp, opts)
+}
+
+func serviceInfo(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
+	var si store.ServiceInfo
+	for _, kv := range resp.Kvs {
+		if serviceName, ok := parseServiceKey(kv.Key); ok {
+			si.Name = serviceName
+			if err := json.Unmarshal(kv.Value, &si.Service); err != nil {
+				return nil, err
+			}
+		} else if serviceName, instanceName, ok := parseInstanceKey(kv.Key); ok {
+			if si.Name != "" && si.Name != serviceName {
+				return nil, fmt.Errorf("inconsistent service names: %q, %q", si.Name, serviceName)
+			}
+			if opts.WithInstances {
+				var instance store.Instance
+				if err := json.Unmarshal(kv.Value, &instance); err != nil {
+					return nil, err
+				}
+				si.Instances = append(si.Instances, store.InstanceInfo{
+					Name:     instanceName,
+					Instance: instance,
+				})
+			}
+		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(kv.Key); ok {
+			if si.Name != "" && si.Name != serviceName {
+				return nil, fmt.Errorf("inconsistent service names: %q, %q", si.Name, serviceName)
+			}
+			if opts.WithContainerRules {
+				var containerRule store.ContainerRule
+				if err := json.Unmarshal(kv.Value, &containerRule); err != nil {
+					return nil, err
+				}
+				si.ContainerRules = append(si.ContainerRules, store.ContainerRuleInfo{
+					Name:          containerRuleName,
+					ContainerRule: containerRule,
+				})
+			}
+		} else {
+			return nil, fmt.Errorf("unknown key %q", kv.Key)
+		}
+	}
+	return &si, nil
+}
+
+func serviceInfos(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
+	fmt.Printf("%#+v", resp)
+	return nil, errors.New("not implemented")
+}
+
+const (
+	serviceKeyPrefixStr = `^` + serviceRoot + `(?P<serviceName>[^\/]+)/`
+	serviceKeyStr       = serviceKeyPrefixStr + `details$`
+	instanceKeyStr      = serviceKeyPrefixStr + `instance/(?P<instanceName>[^\/]+)$`
+	containerRuleKeyStr = serviceKeyPrefixStr + `groupspec/(?P<containerRuleName>[^\/]+)$`
+)
+
+var (
+	serviceKeyRegexp       = regexp.MustCompile(serviceKeyStr)
+	instanceKeyRegexp      = regexp.MustCompile(instanceKeyStr)
+	containerRuleKeyRegexp = regexp.MustCompile(containerRuleKeyStr)
+)
+
+func parseServiceKey(key []byte) (serviceName string, ok bool) {
+	m := serviceKeyRegexp.FindSubmatch(key)
+	if len(m) < 2 {
+		return "", false
+	}
+	return string(m[1]), true
+}
+
+func parseInstanceKey(key []byte) (serviceName, instanceName string, ok bool) {
+	m := instanceKeyRegexp.FindSubmatch(key)
+	if len(m) < 3 {
+		return "", "", false
+	}
+	return string(m[1]), string(m[2]), true
+}
+
+func parseContainerRuleKey(key []byte) (serviceName, containerRuleName string, ok bool) {
+	m := containerRuleKeyRegexp.FindSubmatch(key)
+	if len(m) < 3 {
+		return "", "", false
+	}
+	return string(m[1]), string(m[2]), true
 }
 
 func (s *metcdStore) WatchServices(ctx context.Context, resCh chan<- store.ServiceChange, errorSink daemon.ErrorSink, opts store.QueryServiceOptions) {
