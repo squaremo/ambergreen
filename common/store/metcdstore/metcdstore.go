@@ -14,8 +14,8 @@ import (
 	"github.com/weaveworks/flux/common/store"
 )
 
-// New returns a ServiceDefiner backed by a default metcd server.
-func New(ctx context.Context, minPeerCount int, logger mesh.Logger) store.ServiceDefiner {
+// New returns a Store backed by a default metcd server.
+func New(ctx context.Context, minPeerCount int, logger mesh.Logger) store.Store {
 	// TODO(pb): don't ignore lifecycle management
 	terminatec := make(chan struct{})
 	terminatedc := make(chan error)
@@ -34,16 +34,6 @@ type metcdStore struct {
 
 // ErrNotFound indicates an entity was not found.
 var ErrNotFound = errors.New("not found")
-
-// TODO(pb): remove eventually; just for development
-var (
-	_ store.Cluster         = &metcdStore{}
-	_ store.Pinger          = &metcdStore{}
-	_ store.ServiceDefiner  = &metcdStore{}
-	_ store.InstanceDefiner = &metcdStore{}
-	_ store.ServiceQueryer  = &metcdStore{}
-	_ store.Store           = &metcdStore{}
-)
 
 func (s *metcdStore) GetHosts() ([]*store.Host, error) {
 	return nil, errors.New("not implemented") // TODO(pb)
@@ -66,10 +56,10 @@ func (s *metcdStore) Ping() error {
 }
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {
-	prefix := []byte(serviceRootKey(serviceName))
+	key := []byte(serviceRootKey(serviceName))
 	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
-		Key:      prefix,
-		RangeEnd: metcd.PrefixRangeEnd(prefix),
+		Key:      key,
+		RangeEnd: metcd.PrefixRangeEnd(key),
 	})
 	if err != nil {
 		return err
@@ -93,15 +83,24 @@ func (s *metcdStore) AddService(name string, service store.Service) error {
 }
 
 func (s *metcdStore) RemoveService(serviceName string) error {
-	_, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
-		Key: []byte(serviceRootKey(serviceName)),
+	key := []byte(serviceRootKey(serviceName))
+	resp, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
+		Key:      key,
+		RangeEnd: metcd.PrefixRangeEnd(key),
 	})
-	return err // ignore number of deleted entries
+	if err != nil {
+		return err
+	}
+	if resp.Deleted <= 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *metcdStore) RemoveAllServices() error {
 	_, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
-		Key: []byte(serviceRoot),
+		Key:      []byte(serviceRoot),
+		RangeEnd: metcd.PrefixRangeEnd([]byte(serviceRoot)),
 	})
 	return err
 }
@@ -125,12 +124,29 @@ func (s *metcdStore) RemoveContainerRule(serviceName string, ruleName string) er
 	return err // ignore number of deleted entries
 }
 
-func (s *metcdStore) AddInstance(serviceName, instanceName string, details store.Instance) error {
-	return errors.New("not implemented") // TODO(pb)
+func (s *metcdStore) AddInstance(serviceName, instanceName string, instance store.Instance) error {
+	buf, err := json.Marshal(instance)
+	if err != nil {
+		return err
+	}
+	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
+		Key:   []byte(instanceKey(serviceName, instanceName)),
+		Value: buf,
+	})
+	return err
 }
 
 func (s *metcdStore) RemoveInstance(serviceName, instanceName string) error {
-	return errors.New("not implemented") // TODO(pb)
+	resp, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
+		Key: []byte(instanceKey(serviceName, instanceName)),
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Deleted <= 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {

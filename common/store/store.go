@@ -60,7 +60,7 @@ type ServiceDefiner interface {
 }
 
 type InstanceDefiner interface {
-	AddInstance(serviceName, instanceName string, details Instance) error
+	AddInstance(serviceName, instanceName string, instance Instance) error
 	RemoveInstance(serviceName, instanceName string) error
 }
 
