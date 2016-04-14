@@ -1,6 +1,8 @@
 package store
 
 import (
+	"time"
+
 	"golang.org/x/net/context"
 
 	"github.com/weaveworks/flux/common/daemon"
@@ -34,6 +36,13 @@ type Store interface {
 	ServiceDefiner
 	InstanceDefiner
 	ServiceQueryer
+}
+
+type Cluster interface {
+	GetHosts() ([]*Host, error)
+	Heartbeat(identity string, ttl time.Duration, state *Host) error
+	DeregisterHost(identity string) error
+	WatchHosts(ctx context.Context, changes chan<- HostChange, errs daemon.ErrorSink)
 }
 
 type Pinger interface {
