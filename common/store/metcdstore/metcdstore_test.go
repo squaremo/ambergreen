@@ -154,20 +154,38 @@ func TestMetcdStore(t *testing.T) {
 		t.Fatalf("want %#+v, have %#+v", want, have)
 	}
 
-	/*
-		s.AddService("s2", service)
-		s.AddInstance("s2", "i2", instance)
-		s.AddInstance("s2", "i3", instance)
+	s.AddService("s2", service)
+	s.AddInstance("s2", "i2a", instance)
+	s.AddInstance("s2", "i2b", instance)
 
-		serviceInfos, err := s.GetAllServices(store.QueryServiceOptions{
-			WithInstances:      true,
-			WithContainerRules: true,
-		})
-		if err != nil {
-			t.Fatalf("GetAllServices: %v", err)
-		}
-		t.Logf("GetAllServices: %#+v", serviceInfos)
-	*/
+	serviceInfos, err := s.GetAllServices(store.QueryServiceOptions{
+		WithInstances:      true,
+		WithContainerRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GetAllServices: %v", err)
+	}
+	if want, have := 2, len(serviceInfos); want != have {
+		t.Fatalf("GetAllServices: want %d, have %d", want, have)
+	}
+	if want, have := "s1", serviceInfos[0].Name; want != have {
+		t.Fatalf("GetAllServices: want %q, have %q", want, have)
+	}
+	if want, have := "s2", serviceInfos[1].Name; want != have {
+		t.Fatalf("GetAllServices: 1: want %q, have %q", want, have)
+	}
+	if want, have := 2, len(serviceInfos[1].Instances); want != have {
+		t.Fatalf("GetAllServices: want %d, have %d", want, have)
+	}
+	if want, have := "i2a", serviceInfos[1].Instances[0].Name; want != have {
+		t.Fatalf("GetAllServices: want %q, have %q", want, have)
+	}
+	if want, have := "i2b", serviceInfos[1].Instances[1].Name; want != have {
+		t.Fatalf("GetAllServices: want %q, have %q", want, have)
+	}
+	if want, have := 0, len(serviceInfos[1].ContainerRules); want != have {
+		t.Fatalf("GetAllServices: want %d, have %d", want, have)
+	}
 
 	if err := s.RemoveInstance("s1", "i1"); err != nil {
 		t.Fatalf("RemoveInstance: %v", err)
@@ -175,5 +193,20 @@ func TestMetcdStore(t *testing.T) {
 
 	if err := s.RemoveService("s1"); err != nil {
 		t.Fatalf("RemoveService: %v", err)
+	}
+
+	if err := s.RemoveAllServices(); err != nil {
+		t.Fatalf("RemoveAllServices: %v", err)
+	}
+
+	serviceInfos, err = s.GetAllServices(store.QueryServiceOptions{
+		WithInstances:      true,
+		WithContainerRules: true,
+	})
+	if err != nil {
+		t.Fatalf("GetAllServices: %v", err)
+	}
+	if want, have := 0, len(serviceInfos); want != have {
+		t.Fatalf("GetAllServices: want %d, have %d", want, have)
 	}
 }

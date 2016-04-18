@@ -176,51 +176,111 @@ func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.Se
 }
 
 func serviceInfo(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
-	var si store.ServiceInfo
-	for _, kv := range resp.Kvs {
-		if serviceName, ok := parseServiceKey(kv.Key); ok {
-			si.Name = serviceName
-			if err := json.Unmarshal(kv.Value, &si.Service); err != nil {
-				return nil, err
+	p := newServiceParser(resp, opts)
+	if !p.next() {
+		return nil, fmt.Errorf("failed to parse a service: %v", p.err())
+	}
+	service := p.service()
+	return &service, nil
+}
+
+func serviceInfos(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
+	var services []*store.ServiceInfo
+	p := newServiceParser(resp, opts)
+	for p.next() {
+		service := p.service()
+		services = append(services, &service)
+	}
+	if err := p.err(); err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
+// In the style of bufio.Scanner.
+type serviceParser struct {
+	resp  *etcdserverpb.RangeResponse
+	opts  store.QueryServiceOptions
+	index int
+	name  string
+	curr  store.ServiceInfo
+	er    error
+}
+
+func newServiceParser(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) *serviceParser {
+	return &serviceParser{
+		resp: resp,
+		opts: opts,
+	}
+}
+
+func (p *serviceParser) next() bool {
+	// We enter this function with p.index pointing at a service key. We leave
+	// this function when p.index points at a different service key (or EOF).
+	// Assume that KV order is service key, then other related keys.
+	p.curr = store.ServiceInfo{}
+	for ; p.index < len(p.resp.Kvs); p.index++ {
+		// Assumes resp.Kvs order is service key, then other keys.
+		if serviceName, ok := parseServiceKey(p.resp.Kvs[p.index].Key); ok {
+			if p.curr.Name != "" { // we already parsed a service key, so this is a new one
+				return true // yield the ServiceInfo to the caller
 			}
-		} else if serviceName, instanceName, ok := parseInstanceKey(kv.Key); ok {
-			if si.Name != "" && si.Name != serviceName {
-				return nil, fmt.Errorf("inconsistent service names: %q, %q", si.Name, serviceName)
+			p.curr.Name = serviceName
+			if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &p.curr.Service); err != nil {
+				p.er = err
+				return false
 			}
-			if opts.WithInstances {
+		} else if serviceName, instanceName, ok := parseInstanceKey(p.resp.Kvs[p.index].Key); ok {
+			if p.curr.Name != serviceName {
+				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
+				return false
+			}
+			if p.opts.WithInstances {
 				var instance store.Instance
-				if err := json.Unmarshal(kv.Value, &instance); err != nil {
-					return nil, err
+				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &instance); err != nil {
+					p.er = err
+					return false
 				}
-				si.Instances = append(si.Instances, store.InstanceInfo{
+				p.curr.Instances = append(p.curr.Instances, store.InstanceInfo{
 					Name:     instanceName,
 					Instance: instance,
 				})
 			}
-		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(kv.Key); ok {
-			if si.Name != "" && si.Name != serviceName {
-				return nil, fmt.Errorf("inconsistent service names: %q, %q", si.Name, serviceName)
+		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(p.resp.Kvs[p.index].Key); ok {
+			if p.curr.Name != serviceName {
+				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
+				return false
 			}
-			if opts.WithContainerRules {
+			if p.opts.WithContainerRules {
 				var containerRule store.ContainerRule
-				if err := json.Unmarshal(kv.Value, &containerRule); err != nil {
-					return nil, err
+				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &containerRule); err != nil {
+					p.er = err
+					return false
 				}
-				si.ContainerRules = append(si.ContainerRules, store.ContainerRuleInfo{
+				p.curr.ContainerRules = append(p.curr.ContainerRules, store.ContainerRuleInfo{
 					Name:          containerRuleName,
 					ContainerRule: containerRule,
 				})
 			}
 		} else {
-			return nil, fmt.Errorf("unknown key %q", kv.Key)
+			p.er = fmt.Errorf("unknown key %q", p.resp.Kvs[p.index].Key)
+			return false
 		}
 	}
-	return &si, nil
+	// Special case: we just had one service
+	if p.curr.Name != "" {
+		return true
+	}
+	// Regular case: no more to parse
+	return false
 }
 
-func serviceInfos(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
-	fmt.Printf("%#+v", resp)
-	return nil, errors.New("not implemented")
+func (p *serviceParser) service() store.ServiceInfo {
+	return p.curr
+}
+
+func (p *serviceParser) err() error {
+	return p.er
 }
 
 const (
