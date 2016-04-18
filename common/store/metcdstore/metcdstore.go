@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
@@ -37,20 +36,53 @@ type metcdStore struct {
 // ErrNotFound indicates an entity was not found.
 var ErrNotFound = errors.New("not found")
 
+// The store.Cluster methods provide an interface for clients to register (via
+// Heartbeat) and deregister hosts. Hosts are logical collections of entities, a
+// convenient abstraction for when a node dies and takes many things with it.
+
 func (s *metcdStore) GetHosts() ([]*store.Host, error) {
-	return nil, errors.New("not implemented") // TODO(pb)
+	key := []byte(hostRoot)
+	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
+		Key:      key,
+		RangeEnd: metcd.PrefixRangeEnd(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	hosts := make([]*store.Host, len(resp.Kvs))
+	for i, kv := range resp.Kvs {
+		var host store.Host
+		if err = json.Unmarshal(kv.Value, &host); err != nil {
+			return nil, err
+		}
+		hosts[i] = &host
+	}
+	return hosts, nil
 }
 
 func (s *metcdStore) Heartbeat(identity string, ttl time.Duration, state *store.Host) error {
-	return errors.New("not implemented") // TODO(pb)
+	buf, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	// TODO(pb): metcd must support LeaseServer
+	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
+		Key:   hostKey(identity),
+		Value: buf,
+		//Lease: lease,
+	})
+	return err
 }
 
 func (s *metcdStore) DeregisterHost(identity string) error {
-	return errors.New("not implemented") // TODO(pb)
+	_, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
+		Key: hostKey(identity),
+	})
+	return err
 }
 
 func (s *metcdStore) WatchHosts(ctx context.Context, changes chan<- store.HostChange, errs daemon.ErrorSink) {
-	return // TODO(pb)
+	// TODO(pb): metcd must support WatchServer
 }
 
 func (s *metcdStore) Ping() error {
@@ -58,7 +90,7 @@ func (s *metcdStore) Ping() error {
 }
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {
-	key := []byte(serviceRootKey(serviceName))
+	key := serviceRootKey(serviceName)
 	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
 		Key:      key,
 		RangeEnd: metcd.PrefixRangeEnd(key),
@@ -78,14 +110,14 @@ func (s *metcdStore) AddService(name string, service store.Service) error {
 		return err
 	}
 	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
-		Key:   []byte(serviceKey(name)),
+		Key:   serviceKey(name),
 		Value: buf,
 	})
 	return err
 }
 
 func (s *metcdStore) RemoveService(serviceName string) error {
-	key := []byte(serviceRootKey(serviceName))
+	key := serviceRootKey(serviceName)
 	resp, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
 		Key:      key,
 		RangeEnd: metcd.PrefixRangeEnd(key),
@@ -113,7 +145,7 @@ func (s *metcdStore) SetContainerRule(serviceName string, ruleName string, spec 
 		return err
 	}
 	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
-		Key:   []byte(ruleKey(serviceName, ruleName)),
+		Key:   ruleKey(serviceName, ruleName),
 		Value: buf,
 	})
 	return err
@@ -121,7 +153,7 @@ func (s *metcdStore) SetContainerRule(serviceName string, ruleName string, spec 
 
 func (s *metcdStore) RemoveContainerRule(serviceName string, ruleName string) error {
 	_, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
-		Key: []byte(ruleKey(serviceName, ruleName)),
+		Key: ruleKey(serviceName, ruleName),
 	})
 	return err // ignore number of deleted entries
 }
@@ -132,7 +164,7 @@ func (s *metcdStore) AddInstance(serviceName, instanceName string, instance stor
 		return err
 	}
 	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
-		Key:   []byte(instanceKey(serviceName, instanceName)),
+		Key:   instanceKey(serviceName, instanceName),
 		Value: buf,
 	})
 	return err
@@ -140,7 +172,7 @@ func (s *metcdStore) AddInstance(serviceName, instanceName string, instance stor
 
 func (s *metcdStore) RemoveInstance(serviceName, instanceName string) error {
 	resp, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
-		Key: []byte(instanceKey(serviceName, instanceName)),
+		Key: instanceKey(serviceName, instanceName),
 	})
 	if err != nil {
 		return err
@@ -152,7 +184,7 @@ func (s *metcdStore) RemoveInstance(serviceName, instanceName string) error {
 }
 
 func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
-	key := []byte(serviceRootKey(serviceName))
+	key := serviceRootKey(serviceName)
 	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
 		Key:      key,
 		RangeEnd: metcd.PrefixRangeEnd(key),
@@ -160,7 +192,12 @@ func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptio
 	if err != nil {
 		return nil, err
 	}
-	return serviceInfo(resp, opts)
+	p := newServiceParser(resp, opts)
+	if !p.next() {
+		return nil, fmt.Errorf("failed to parse a service: %v", p.err())
+	}
+	service := p.service()
+	return &service, nil
 }
 
 func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
@@ -172,19 +209,6 @@ func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.Se
 	if err != nil {
 		return nil, err
 	}
-	return serviceInfos(resp, opts)
-}
-
-func serviceInfo(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) (*store.ServiceInfo, error) {
-	p := newServiceParser(resp, opts)
-	if !p.next() {
-		return nil, fmt.Errorf("failed to parse a service: %v", p.err())
-	}
-	service := p.service()
-	return &service, nil
-}
-
-func serviceInfos(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
 	var services []*store.ServiceInfo
 	p := newServiceParser(resp, opts)
 	for p.next() {
@@ -195,129 +219,6 @@ func serviceInfos(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptio
 		return nil, err
 	}
 	return services, nil
-}
-
-// In the style of bufio.Scanner.
-type serviceParser struct {
-	resp  *etcdserverpb.RangeResponse
-	opts  store.QueryServiceOptions
-	index int
-	name  string
-	curr  store.ServiceInfo
-	er    error
-}
-
-func newServiceParser(resp *etcdserverpb.RangeResponse, opts store.QueryServiceOptions) *serviceParser {
-	return &serviceParser{
-		resp: resp,
-		opts: opts,
-	}
-}
-
-func (p *serviceParser) next() bool {
-	// We enter this function with p.index pointing at a service key. We leave
-	// this function when p.index points at a different service key (or EOF).
-	// Assume that KV order is service key, then other related keys.
-	p.curr = store.ServiceInfo{}
-	for ; p.index < len(p.resp.Kvs); p.index++ {
-		// Assumes resp.Kvs order is service key, then other keys.
-		if serviceName, ok := parseServiceKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != "" { // we already parsed a service key, so this is a new one
-				return true // yield the ServiceInfo to the caller
-			}
-			p.curr.Name = serviceName
-			if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &p.curr.Service); err != nil {
-				p.er = err
-				return false
-			}
-		} else if serviceName, instanceName, ok := parseInstanceKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
-				return false
-			}
-			if p.opts.WithInstances {
-				var instance store.Instance
-				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &instance); err != nil {
-					p.er = err
-					return false
-				}
-				p.curr.Instances = append(p.curr.Instances, store.InstanceInfo{
-					Name:     instanceName,
-					Instance: instance,
-				})
-			}
-		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
-				return false
-			}
-			if p.opts.WithContainerRules {
-				var containerRule store.ContainerRule
-				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &containerRule); err != nil {
-					p.er = err
-					return false
-				}
-				p.curr.ContainerRules = append(p.curr.ContainerRules, store.ContainerRuleInfo{
-					Name:          containerRuleName,
-					ContainerRule: containerRule,
-				})
-			}
-		} else {
-			p.er = fmt.Errorf("unknown key %q", p.resp.Kvs[p.index].Key)
-			return false
-		}
-	}
-	// Special case: we just had one service
-	if p.curr.Name != "" {
-		return true
-	}
-	// Regular case: no more to parse
-	return false
-}
-
-func (p *serviceParser) service() store.ServiceInfo {
-	return p.curr
-}
-
-func (p *serviceParser) err() error {
-	return p.er
-}
-
-const (
-	serviceKeyPrefixStr = `^` + serviceRoot + `(?P<serviceName>[^\/]+)/`
-	serviceKeyStr       = serviceKeyPrefixStr + `details$`
-	instanceKeyStr      = serviceKeyPrefixStr + `instance/(?P<instanceName>[^\/]+)$`
-	containerRuleKeyStr = serviceKeyPrefixStr + `groupspec/(?P<containerRuleName>[^\/]+)$`
-)
-
-var (
-	serviceKeyRegexp       = regexp.MustCompile(serviceKeyStr)
-	instanceKeyRegexp      = regexp.MustCompile(instanceKeyStr)
-	containerRuleKeyRegexp = regexp.MustCompile(containerRuleKeyStr)
-)
-
-func parseServiceKey(key []byte) (serviceName string, ok bool) {
-	m := serviceKeyRegexp.FindSubmatch(key)
-	if len(m) < 2 {
-		return "", false
-	}
-	return string(m[1]), true
-}
-
-func parseInstanceKey(key []byte) (serviceName, instanceName string, ok bool) {
-	m := instanceKeyRegexp.FindSubmatch(key)
-	if len(m) < 3 {
-		return "", "", false
-	}
-	return string(m[1]), string(m[2]), true
-}
-
-func parseContainerRuleKey(key []byte) (serviceName, containerRuleName string, ok bool) {
-	m := containerRuleKeyRegexp.FindSubmatch(key)
-	if len(m) < 3 {
-		return "", "", false
-	}
-	return string(m[1]), string(m[2]), true
 }
 
 func (s *metcdStore) WatchServices(ctx context.Context, resCh chan<- store.ServiceChange, errorSink daemon.ErrorSink, opts store.QueryServiceOptions) {
