@@ -16,27 +16,121 @@ type heartbeat struct {
 	updateCount int
 }
 
-func NewInMemStore() *InMem {
+type sessionHost struct {
+	*store.Host
+	session string
+}
+
+type sessionInstance struct {
+	store.Instance
+	session string
+}
+
+func NewInMem() *InMem {
 	return &InMem{
-		services:   make(map[string]store.Service),
-		groupSpecs: make(map[string]map[string]store.ContainerRule),
-		instances:  make(map[string]map[string]store.Instance),
-		hosts:      make(map[string]*store.Host),
-		heartbeats: make(map[string]*heartbeat),
-		hostTimers: make(map[string]*time.Timer),
+		services:        make(map[string]store.Service),
+		groupSpecs:      make(map[string]map[string]store.ContainerRule),
+		instances:       make(map[string]map[string]*sessionInstance),
+		hosts:           make(map[string]*sessionHost),
+		heartbeats:      make(map[string]*heartbeat),
+		heartbeatTimers: make(map[string]*time.Timer),
 	}
 }
 
 type InMem struct {
-	services      map[string]store.Service
-	groupSpecs    map[string]map[string]store.ContainerRule
-	instances     map[string]map[string]store.Instance
-	hosts         map[string]*store.Host
-	heartbeats    map[string]*heartbeat
-	hostTimers    map[string]*time.Timer
-	watchersLock  sync.Mutex
-	watchers      []Watcher
-	injectedError error
+	services        map[string]store.Service
+	groupSpecs      map[string]map[string]store.ContainerRule
+	instances       map[string]map[string]*sessionInstance
+	hosts           map[string]*sessionHost
+	heartbeats      map[string]*heartbeat
+	heartbeatTimers map[string]*time.Timer
+	watchersLock    sync.Mutex
+	watchers        []Watcher
+	injectedError   error
+}
+
+func (s *InMem) GetHeartbeat(identity string) (int, error) {
+	if record, found := s.heartbeats[identity]; found {
+		return record.updateCount, nil
+	}
+	return 0, fmt.Errorf(`Host never had heartbeats: "%s"`, identity)
+}
+
+type inmemStore struct {
+	*InMem
+	session string
+}
+
+func (inmem *InMem) Store(sessionID string) store.RuntimeStore {
+	return &inmemStore{
+		InMem:   inmem,
+		session: sessionID,
+	}
+}
+
+func (s *inmemStore) StartFunc() daemon.StartFunc {
+	return daemon.NullStartFunc
+}
+
+func (s *inmemStore) AddInstance(serviceName string, instanceName string, inst store.Instance) error {
+	s.instances[serviceName][instanceName] = &sessionInstance{Instance: inst, session: s.session}
+	s.fireServiceChange(serviceName, false, withInstanceChanges)
+	return s.injectedError
+}
+
+func (s *inmemStore) RegisterHost(identity string, details *store.Host) error {
+	s.hosts[identity] = &sessionHost{Host: details, session: s.session}
+	s.fireHostChange(identity, false)
+	return nil
+}
+
+func (s *inmemStore) Heartbeat(ttl time.Duration) error {
+	identity := s.session
+	fmt.Printf("Heartbeat: %s TTL %d ms\n", identity, ttl/time.Millisecond)
+
+	if record, found := s.heartbeats[identity]; found {
+		record.updateCount++
+	} else {
+		s.heartbeats[identity] = &heartbeat{0}
+	}
+	if s.heartbeatTimers[identity] != nil {
+		s.heartbeatTimers[identity].Reset(ttl)
+	} else {
+		s.heartbeatTimers[identity] = time.AfterFunc(ttl, func() {
+			fmt.Printf("Heartbeat timer fired for %s\n", identity)
+			s.EndSession()
+		})
+	}
+	return nil
+}
+
+func (s *inmemStore) EndSession() error {
+	if timer, found := s.heartbeatTimers[s.session]; found {
+		timer.Stop()
+		delete(s.heartbeatTimers, s.session)
+	}
+
+	for hostName, host := range s.hosts {
+		if host.session == s.session {
+			delete(s.hosts, hostName)
+			s.fireHostChange(hostName, true)
+		}
+	}
+
+	for serviceName, _ := range s.instances {
+		changed := false
+		for instanceName, instance := range s.instances[serviceName] {
+			if instance.session == s.session {
+				delete(s.instances[serviceName], instanceName)
+				changed = true
+			}
+		}
+		if changed {
+			s.fireServiceChange(serviceName, false, withInstanceChanges)
+		}
+	}
+
+	return nil
 }
 
 type Watcher interface {
@@ -139,7 +233,7 @@ func (s *InMem) CheckRegisteredService(name string) error {
 func (s *InMem) AddService(name string, svc store.Service) error {
 	s.services[name] = svc
 	s.groupSpecs[name] = make(map[string]store.ContainerRule)
-	s.instances[name] = make(map[string]store.Instance)
+	s.instances[name] = make(map[string]*sessionInstance)
 
 	s.fireServiceChange(name, false, nil)
 	log.Printf("InMem: service %s updated in store", name)
@@ -173,33 +267,30 @@ func (s *InMem) GetService(name string, opts store.QueryServiceOptions) (*store.
 }
 
 func (s *InMem) makeServiceInfo(name string, svc store.Service, opts store.QueryServiceOptions) *store.ServiceInfo {
-	info := &store.ServiceInfo{
-		Name:    name,
-		Service: svc,
-	}
+	info := &store.ServiceInfo{Service: svc}
 
 	if opts.WithInstances {
-		for n, i := range s.instances[info.Name] {
-			info.Instances = append(info.Instances,
-				store.InstanceInfo{Name: n, Instance: i})
+		info.Instances = make(map[string]store.Instance)
+		for n, i := range s.instances[name] {
+			info.Instances[n] = i.Instance
 		}
 	}
 
 	if opts.WithContainerRules {
-		for n, g := range s.groupSpecs[info.Name] {
-			info.ContainerRules = append(info.ContainerRules,
-				store.ContainerRuleInfo{Name: n, ContainerRule: g})
+		info.ContainerRules = make(map[string]store.ContainerRule)
+		for n, g := range s.groupSpecs[name] {
+			info.ContainerRules[n] = g
 		}
 	}
 
 	return info
 }
 
-func (s *InMem) GetAllServices(opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
-	var svcs []*store.ServiceInfo
+func (s *InMem) GetAllServices(opts store.QueryServiceOptions) (map[string]*store.ServiceInfo, error) {
+	svcs := make(map[string]*store.ServiceInfo)
 
 	for name, svc := range s.services {
-		svcs = append(svcs, s.makeServiceInfo(name, svc, opts))
+		svcs[name] = s.makeServiceInfo(name, svc, opts)
 	}
 
 	return svcs, s.injectedError
@@ -235,12 +326,6 @@ func withInstanceChanges(opts store.QueryServiceOptions) bool {
 	return opts.WithInstances
 }
 
-func (s *InMem) AddInstance(serviceName string, instanceName string, inst store.Instance) error {
-	s.instances[serviceName][instanceName] = inst
-	s.fireServiceChange(serviceName, false, withInstanceChanges)
-	return s.injectedError
-}
-
 func (s *InMem) RemoveInstance(serviceName string, instanceName string) error {
 	if _, found := s.instances[serviceName][instanceName]; !found {
 		return fmt.Errorf("service '%s' has no instance '%s'",
@@ -266,37 +351,10 @@ func (s *InMem) GetHosts() ([]*store.Host, error) {
 	var hosts []*store.Host = make([]*store.Host, len(s.hosts))
 	i := 0
 	for _, host := range s.hosts {
-		hosts[i] = host
+		hosts[i] = host.Host
 		i++
 	}
 	return hosts, nil
-}
-
-func (s *InMem) Heartbeat(identity string, ttl time.Duration, state *store.Host) error {
-	fmt.Printf("Heartbeat: %s TTL %d ms\n", identity, ttl/time.Millisecond)
-	s.hosts[identity] = state
-	if record, found := s.heartbeats[identity]; found {
-		record.updateCount++
-	} else {
-		s.heartbeats[identity] = &heartbeat{0}
-	}
-	if s.hostTimers[identity] != nil {
-		s.hostTimers[identity].Reset(ttl)
-	} else {
-		s.hostTimers[identity] = time.AfterFunc(ttl, func() {
-			fmt.Printf("Host timer fired for %s\n", identity)
-			s.deleteHost(identity)
-		})
-		s.fireHostChange(identity, false)
-	}
-	return nil
-}
-
-func (s *InMem) GetHeartbeat(identity string) (int, error) {
-	if record, found := s.heartbeats[identity]; found {
-		return record.updateCount, nil
-	}
-	return 0, fmt.Errorf(`Host never had heartbeats: "%s"`, identity)
 }
 
 func (s *InMem) DeregisterHost(identity string) error {
@@ -306,11 +364,7 @@ func (s *InMem) DeregisterHost(identity string) error {
 
 func (s *InMem) deleteHost(identity string) {
 	delete(s.hosts, identity)
-	if s.hostTimers[identity] != nil {
-		s.hostTimers[identity].Stop()
-		delete(s.hostTimers, identity)
-		s.fireHostChange(identity, true)
-	}
+	s.fireHostChange(identity, true)
 }
 
 func (s *InMem) WatchHosts(ctx context.Context, changes chan<- store.HostChange, errs daemon.ErrorSink) {

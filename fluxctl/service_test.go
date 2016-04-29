@@ -1,14 +1,16 @@
 package main
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/weaveworks/flux/common/netutil"
 	"github.com/weaveworks/flux/common/store"
 )
 
-func allServices(t *testing.T, st store.Store) []*store.ServiceInfo {
+func allServices(t *testing.T, st store.Store) map[string]*store.ServiceInfo {
 	services, err := st.GetAllServices(store.QueryServiceOptions{})
 	require.NoError(t, err)
 	return services
@@ -24,7 +26,7 @@ func TestMinimal(t *testing.T) {
 	require.NoError(t, err)
 	services := allServices(t, st)
 	require.Len(t, services, 1)
-	require.Equal(t, "foo", services[0].Name)
+	require.NotNil(t, services["foo"])
 }
 
 func TestParseAddress(t *testing.T) {
@@ -34,8 +36,7 @@ func TestParseAddress(t *testing.T) {
 	svc, err = parseAddress("192.168.45.76:8000")
 	require.NoError(t, err)
 	require.Equal(t, store.Service{
-		Address:  "192.168.45.76",
-		Port:     8000,
+		Address:  &netutil.IPPort{net.ParseIP("192.168.45.76"), 8000},
 		Protocol: "",
 	}, svc)
 }
@@ -46,10 +47,9 @@ func TestServiceAddress(t *testing.T) {
 	require.NoError(t, err)
 	services := allServices(t, st)
 	require.Len(t, services, 1)
-	require.Equal(t, "foo", services[0].Name)
-	require.Equal(t, "10.3.4.5", services[0].Address)
-	require.Equal(t, 8000, services[0].Port)
-	require.Equal(t, 7777, services[0].InstancePort)
+	require.NotNil(t, services["foo"])
+	require.Equal(t, &netutil.IPPort{net.ParseIP("10.3.4.5"), 8000}, services["foo"].Address)
+	require.Equal(t, 7777, services["foo"].InstancePort)
 }
 
 func TestServiceSelect(t *testing.T) {
@@ -63,10 +63,9 @@ func TestServiceSelect(t *testing.T) {
 	require.NoError(t, err)
 	specs := svc.ContainerRules
 	require.Len(t, specs, 1)
-	spec := specs[0]
-	require.NotNil(t, spec)
-	require.Equal(t, DEFAULT_GROUP, spec.Name)
-	require.Equal(t, store.Selector(map[string]string{
-		"image": "repo/image",
-	}), spec.Selector)
+	require.Equal(t, store.ContainerRule{
+		Selector: map[string]string{
+			"image": "repo/image",
+		},
+	}, specs[DEFAULT_GROUP])
 }

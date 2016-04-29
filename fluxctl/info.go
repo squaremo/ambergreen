@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	//	"text/tabwriter"
-	//	"text/template"
 
 	"github.com/spf13/cobra"
 
@@ -36,21 +34,17 @@ func (opts *infoOpts) run(_ *cobra.Command, args []string) error {
 	}
 	fmt.Fprint(opts.getStdout(), "HOSTS\n")
 	for _, host := range hosts {
-		fmt.Fprintln(opts.getStdout(), host.IPAddress)
+		fmt.Fprintln(opts.getStdout(), host.IP)
 	}
 	fmt.Fprint(opts.getStdout(), "\nSERVICES\n")
 
-	var (
-		svcs []*store.ServiceInfo
-	)
 	qopts := store.QueryServiceOptions{
 		WithInstances:      true,
 		WithContainerRules: true,
 	}
+	svcs := make(map[string]*store.ServiceInfo)
 	if opts.service != "" {
-		var svc *store.ServiceInfo
-		svc, err = opts.store.GetService(opts.service, qopts)
-		svcs = []*store.ServiceInfo{svc}
+		svcs[opts.service], err = opts.store.GetService(opts.service, qopts)
 	} else {
 		svcs, err = opts.store.GetAllServices(qopts)
 	}
@@ -58,27 +52,38 @@ func (opts *infoOpts) run(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	for _, svc := range svcs {
-		if err := printService(opts.getStdout(), svc); err != nil {
+	for name, svc := range svcs {
+		if err := printService(opts.getStdout(), name, svc); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func printService(out io.Writer, svc *store.ServiceInfo) error {
-	fmt.Fprintf(out, "%s\n", svc.Name)
+func printService(out io.Writer, name string, svc *store.ServiceInfo) error {
+	fmt.Fprintln(out, name)
+
+	if svc.Address != nil {
+		fmt.Fprintf(out, "  Address: %s\n", svc.Address)
+	}
+	if svc.InstancePort != 0 {
+		fmt.Fprintf(out, "  Instance port: %d\n", svc.InstancePort)
+	}
+	if svc.Protocol != "" {
+		fmt.Fprintf(out, "  Protocol: %s\n", svc.Protocol)
+	}
+
 	fmt.Fprint(out, "  RULES\n")
-	for _, rule := range svc.ContainerRules {
+	for ruleName, rule := range svc.ContainerRules {
 		selectBytes, err := json.Marshal(rule.Selector)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "    %s %s\n", rule.Name, selectBytes)
+		fmt.Fprintf(out, "    %s %s\n", ruleName, selectBytes)
 	}
 	fmt.Fprint(out, "  INSTANCES\n")
-	for _, inst := range svc.Instances {
-		fmt.Fprintf(out, "    %s %s:%d %s\n", inst.Name, inst.Address, inst.Port, inst.State)
+	for instName, inst := range svc.Instances {
+		fmt.Fprintf(out, "    %s %s\n", instName, inst.Address)
 	}
 	return nil
 }

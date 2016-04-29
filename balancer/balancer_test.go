@@ -1,6 +1,7 @@
 package balancer
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +13,19 @@ import (
 	"github.com/weaveworks/flux/balancer/model"
 	"github.com/weaveworks/flux/common/daemon"
 	"github.com/weaveworks/flux/common/etcdutil"
+	"github.com/weaveworks/flux/common/netutil"
 	"github.com/weaveworks/flux/common/store"
 	"github.com/weaveworks/flux/common/store/etcdstore"
 	"github.com/weaveworks/flux/common/test/embeddedetcd"
 )
+
+type mockRuntimeStore struct {
+	store.Store
+}
+
+func (_ *mockRuntimeStore) StartFunc() daemon.StartFunc {
+	return daemon.NullStartFunc
+}
 
 func TestEtcdRestart(t *testing.T) {
 	server, err := embeddedetcd.NewSimpleEtcd()
@@ -25,6 +35,7 @@ func TestEtcdRestart(t *testing.T) {
 	c, err := etcdutil.NewClient(server.URL())
 	require.Nil(t, err)
 	st := etcdstore.New(c)
+	st.Heartbeat(30 * time.Second)
 
 	mipt := newMockIPTables(t)
 	done := make(chan model.ServiceUpdate, 10)
@@ -38,7 +49,7 @@ func TestEtcdRestart(t *testing.T) {
 			chain:  "FLUX",
 			bridge: "lo",
 		},
-		store: st,
+		store: &mockRuntimeStore{st},
 		startEventHandler: func(daemon.ErrorSink) events.Handler {
 			return eventlogger.EventLogger{}
 		},
@@ -56,8 +67,7 @@ func TestEtcdRestart(t *testing.T) {
 	// Add a service and instance, and check that the balancer
 	// heard about it
 	require.Nil(t, st.AddService("svc", store.Service{
-		Address:  "127.42.0.1",
-		Port:     8888,
+		Address:  &netutil.IPPort{net.ParseIP("127.42.0.1"), 8888},
 		Protocol: "tcp",
 	}))
 	require.False(t, (<-done).Reset)
@@ -72,9 +82,7 @@ func TestEtcdRestart(t *testing.T) {
 	require.True(t, (<-done).Reset)
 
 	require.Nil(t, st.AddInstance("svc", "inst", store.Instance{
-		Address: "127.0.0.1",
-		Port:    10000,
-		State:   store.LIVE,
+		Address: &netutil.IPPort{net.ParseIP("127.0.0.1"), 10000},
 	}))
 	require.False(t, (<-done).Reset)
 

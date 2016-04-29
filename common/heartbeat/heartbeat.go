@@ -10,57 +10,15 @@ import (
 )
 
 type HeartbeatConfig struct {
-	Cluster      store.Cluster
-	TTL          time.Duration
-	HostIdentity string
-	HostState    *store.Host
+	Cluster store.Cluster
+	TTL     time.Duration
 }
 
-func (config HeartbeatConfig) Start(errorSink daemon.ErrorSink) daemon.Component {
-	heart := Heart{
-		config: config,
-	}
-	if err := heart.beat(); err != nil {
-		errorSink.Post(err)
-		return &heart
-	}
-	go heart.Run(errorSink)
-	return &heart
+func (config HeartbeatConfig) StartFunc() daemon.StartFunc {
+	return daemon.Ticker(config.TTL/2, config.beat)
 }
 
-type Heart struct {
-	config HeartbeatConfig
-	ticker *time.Ticker
-	cancel chan struct{}
-}
-
-func (heart *Heart) beat() error {
-	return heart.config.Cluster.Heartbeat(heart.config.HostIdentity,
-		heart.config.TTL, heart.config.HostState)
-}
-
-func (heart *Heart) Run(errorSink daemon.ErrorSink) {
-	heart.cancel = make(chan struct{})
-	heart.ticker = time.NewTicker(heart.config.TTL / 2)
-	for {
-		select {
-		case t := <-heart.ticker.C:
-			if err := heart.beat(); err != nil {
-				errorSink.Post(err)
-				return
-			}
-			log.Infof("Heartbeat sent at %s", t.String())
-		case <-heart.cancel:
-			return
-		}
-	}
-}
-
-func (heart *Heart) Stop() {
-	if heart.ticker != nil {
-		heart.ticker.Stop()
-	}
-	if heart.cancel != nil {
-		heart.cancel <- struct{}{}
-	}
+func (heart *HeartbeatConfig) beat(t time.Time) error {
+	log.Debugf("Heartbeat at %s", t)
+	return heart.Cluster.Heartbeat(heart.TTL)
 }

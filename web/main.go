@@ -66,14 +66,14 @@ func (api *api) router() http.Handler {
 }
 
 // List all services, along with their instances and accompanying
-// metastore.
+// metadata.
 
 func (api *api) allServices(w http.ResponseWriter, r *http.Request) {
 	services, err := api.store.GetAllServices(store.QueryServiceOptions{WithInstances: true})
 	if err != nil {
 		http.Error(w, "Error getting services from store: "+err.Error(), 500)
 	}
-	json.NewEncoder(w).Encode(&services)
+	json.NewEncoder(w).Encode(wrapServiceInfos(services))
 }
 
 /* Proxy for prometheus, as a stop-gap */
@@ -87,7 +87,7 @@ func (api *api) proxyStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.StatusCode != 200 {
-		log.Printf("Request to prometheus at %d: %d response", path, resp.StatusCode)
+		log.Printf("Request to prometheus at %s: %d response", path, resp.StatusCode)
 	}
 
 	defer resp.Body.Close()
@@ -96,4 +96,56 @@ func (api *api) proxyStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// Wrapper types to decuople the web JSON from the store types
+
+type serviceInfo struct {
+	Name string `json:"name"`
+	store.Service
+	Instances      []instanceInfo      `json:"instances,omitempty"`
+	ContainerRules []containerRuleInfo `json:"groups,omitempty"`
+}
+
+type instanceInfo struct {
+	Name string `json:"name"`
+	store.Instance
+}
+
+type containerRuleInfo struct {
+	Name string `json:"name"`
+	store.ContainerRule
+}
+
+func wrapServiceInfo(name string, si *store.ServiceInfo) serviceInfo {
+	var insts []instanceInfo
+	for instName, inst := range si.Instances {
+		insts = append(insts, instanceInfo{
+			Name:     instName,
+			Instance: inst,
+		})
+	}
+
+	var rules []containerRuleInfo
+	for name, cr := range si.ContainerRules {
+		rules = append(rules, containerRuleInfo{
+			Name:          name,
+			ContainerRule: cr,
+		})
+	}
+
+	return serviceInfo{
+		Name:           name,
+		Service:        si.Service,
+		Instances:      insts,
+		ContainerRules: rules,
+	}
+}
+
+func wrapServiceInfos(svcs map[string]*store.ServiceInfo) []serviceInfo {
+	var res []serviceInfo
+	for name, si := range svcs {
+		res = append(res, wrapServiceInfo(name, si))
+	}
+	return res
 }

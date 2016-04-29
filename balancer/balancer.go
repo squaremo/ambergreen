@@ -39,7 +39,7 @@ type BalancerConfig struct {
 	netConfig netConfig
 	prom      prometheus.Config
 	debug     bool
-	store     store.Store
+	store     store.RuntimeStore
 	hostIP    net.IP
 
 	// Filled by Prepare
@@ -96,7 +96,7 @@ func (cf *BalancerConfig) Prepare() (daemon.StartFunc, error) {
 	}
 
 	updates := make(chan model.ServiceUpdate)
-	startWatcher := daemon.Restart(cf.reconnectInterval, model.WatchServicesStartFunc(cf.store, updates))
+	startWatcher := daemon.Restart(cf.reconnectInterval, model.WatchServicesStartFunc(cf.store, true, updates))
 
 	startBalancer := func(errs daemon.ErrorSink) daemon.Component {
 		b := &balancer{

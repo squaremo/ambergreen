@@ -1,18 +1,19 @@
 package agent
 
 import (
+	"net"
 	"strings"
 	"testing"
 
 	"github.com/weaveworks/flux/common/daemon"
+	"github.com/weaveworks/flux/common/netutil"
 	"github.com/weaveworks/flux/common/store"
-	"github.com/weaveworks/flux/common/store/inmem"
 
 	docker "github.com/fsouza/go-dockerclient"
 	"github.com/stretchr/testify/require"
 )
 
-type container struct {
+type containerInfo struct {
 	ID          string
 	IPAddress   string
 	Image       string
@@ -22,26 +23,7 @@ type container struct {
 	NetworkMode string
 }
 
-func resetContainers(cs ...container) ContainerUpdate {
-	return ContainerUpdate{
-		Containers: makeContainersMap(cs),
-		Reset:      true,
-	}
-}
-
-func addContainer(c container) ContainerUpdate {
-	return ContainerUpdate{
-		Containers: makeContainersMap([]container{c}),
-	}
-}
-
-func removeContainer(id string) ContainerUpdate {
-	return ContainerUpdate{
-		Containers: map[string]*docker.Container{id: nil},
-	}
-}
-
-func makeContainersMap(cs []container) map[string]*docker.Container {
+func makeContainersMap(cs []containerInfo) map[string]*docker.Container {
 	containers := make(map[string]*docker.Container)
 
 	for _, c := range cs {
@@ -87,46 +69,63 @@ func makeContainersMap(cs []container) map[string]*docker.Container {
 const GROUP = "deliberately not default"
 
 type harness struct {
-	si *syncInstances
-	store.Store
-	serviceUpdates   chan store.ServiceUpdate
-	watchingServices daemon.Component
+	hostIP                net.IP
+	errs                  daemon.ErrorSink
+	serviceUpdates        chan store.ServiceUpdate
+	serviceUpdatesReset   chan struct{}
+	containerUpdates      chan ContainerUpdate
+	containerUpdatesReset chan struct{}
+	instanceUpdates       chan InstanceUpdate
+	instanceUpdatesReset  chan struct{}
+	syncInstances         daemon.Component
 }
 
-func setup(st store.Store, hostIP, netmode string) (h harness) {
-	if st == nil {
-		st = inmem.NewInMemStore()
+func setup(hostIP, netmode string) harness {
+	h := harness{
+		hostIP:                net.ParseIP(hostIP),
+		errs:                  daemon.NewErrorSink(),
+		serviceUpdates:        make(chan store.ServiceUpdate),
+		containerUpdatesReset: make(chan struct{}, 10),
+		containerUpdates:      make(chan ContainerUpdate),
+		serviceUpdatesReset:   make(chan struct{}, 10),
+		instanceUpdates:       make(chan InstanceUpdate),
+		instanceUpdatesReset:  make(chan struct{}),
 	}
 
-	if netmode == "" {
-		netmode = LOCAL
-	}
+	h.syncInstances = syncInstancesConfig{
+		network: netmode,
+		hostIP:  h.hostIP,
 
-	h.Store = st
-	h.si = &syncInstances{
-		syncInstancesConfig: syncInstancesConfig{
-			store:   h.Store,
-			network: netmode,
-			hostIP:  hostIP,
-		},
-		ErrorSink: daemon.NewErrorSink(),
-	}
-	h.serviceUpdates = make(chan store.ServiceUpdate)
-	return
-}
+		containerUpdates:      h.containerUpdates,
+		containerUpdatesReset: h.containerUpdatesReset,
+		serviceUpdates:        h.serviceUpdates,
+		serviceUpdatesReset:   h.serviceUpdatesReset,
+		instanceUpdates:       h.instanceUpdates,
+		instanceUpdatesReset:  h.instanceUpdatesReset,
+	}.StartFunc()(h.errs)
 
-func (h *harness) watchServices() {
-	h.watchingServices = store.WatchServicesStartFunc(h.Store,
-		store.QueryServiceOptions{WithContainerRules: true},
-		h.serviceUpdates)(h.si.ErrorSink)
+	return h
 }
 
 func (h *harness) stop(t *testing.T) {
-	h.watchingServices.Stop()
-	require.Empty(t, h.si.ErrorSink)
+	h.syncInstances.Stop()
+	require.Empty(t, h.errs)
 }
 
-func (h *harness) addGroup(serviceName string, labels ...string) {
+func (h *harness) addContainers(reset bool, cs ...containerInfo) {
+	h.containerUpdates <- ContainerUpdate{
+		Containers: makeContainersMap(cs),
+		Reset:      reset,
+	}
+}
+
+func (h *harness) removeContainer(id string) {
+	h.containerUpdates <- ContainerUpdate{
+		Containers: map[string]*docker.Container{id: nil},
+	}
+}
+
+func makeGroup(labels ...string) store.ContainerRule {
 	if len(labels)%2 != 0 {
 		panic("Expected key value ... as arguments")
 	}
@@ -134,276 +133,289 @@ func (h *harness) addGroup(serviceName string, labels ...string) {
 	for i := 0; i < len(labels); i += 2 {
 		sel[labels[i]] = labels[i+1]
 	}
-
-	h.SetContainerRule(serviceName, GROUP,
-		store.ContainerRule{Selector: sel})
+	return store.ContainerRule{sel}
 }
 
-func (h *harness) allInstances(t *testing.T) []store.Instance {
-	var res []store.Instance
-	svcs, err := h.GetAllServices(store.QueryServiceOptions{WithInstances: true})
-	require.Nil(t, err)
-	for _, svc := range svcs {
-		for _, inst := range svc.Instances {
-			res = append(res, inst.Instance)
-		}
+func cris(name string, labels ...string) map[string]store.ContainerRule {
+	return map[string]store.ContainerRule{
+		name: makeGroup(labels...),
 	}
-	return res
+}
+
+func serviceUpdate(reset bool, name string, svc store.ServiceInfo) store.ServiceUpdate {
+	return store.ServiceUpdate{
+		Services: map[string]*store.ServiceInfo{name: &svc},
+		Reset:    reset,
+	}
+}
+
+func (iu InstanceUpdate) get(svc, inst string) *store.Instance {
+	return iu.Instances[InstanceKey{Service: svc, Instance: inst}]
 }
 
 func TestSyncInstancesReconcile(t *testing.T) {
-	h := setup(nil, "10.98.99.100", GLOBAL)
-	h.AddService("foo-svc", store.Service{
-		InstancePort: 80,
-	})
-	h.addGroup("foo-svc", "tag", "bobbins", "image", "foo-image")
-	h.AddService("bar-svc", store.Service{
-		InstancePort: 80,
-	})
-	h.addGroup("bar-svc", "flux/foo-label", "blorp")
-	h.AddService("boo-svc", store.Service{
-		InstancePort: 80,
-	})
-	h.addGroup("boo-svc", "env.SERVICE_NAME", "boo")
+	h := setup("10.98.99.100", GLOBAL)
 
-	selectedAddress := "192.168.45.67"
+	h.serviceUpdates <- serviceUpdate(true, "foo-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "tag", "bobbins", "image", "foo-image"),
+	})
+	h.serviceUpdates <- serviceUpdate(false, "bar-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "flux/foo-label", "blorp"),
+	})
+	h.serviceUpdates <- serviceUpdate(false, "boo-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "env.SERVICE_NAME", "boo"),
+	})
 
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	h.si.processContainerUpdate(resetContainers(container{
+	selectedAddress := net.ParseIP("192.168.45.67")
+
+	h.addContainers(true, containerInfo{
 		ID:        "selected",
-		IPAddress: selectedAddress,
+		IPAddress: selectedAddress.String(),
 		Image:     "foo-image:bobbins",
 		Labels:    map[string]string{"flux/foo-label": "blorp"},
 		Env:       map[string]string{"SERVICE_NAME": "boo"},
-	}, container{
+	}, containerInfo{
 		ID:        "not",
 		IPAddress: "111.111.111.111",
 		Image:     "foo-image:not-bobbins",
 		Labels:    map[string]string{"flux/foo-label": "something-else"},
 		Env:       map[string]string{"SERVICE_NAME": "literally anything"},
-	}))
+	})
 
-	insts := h.allInstances(t)
-	require.Len(t, insts, 3)
-	for _, inst := range insts {
-		require.Equal(t, selectedAddress, inst.Address)
-	}
-
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 3)
+	require.Equal(t, selectedAddress, iu.get("foo-svc", "selected").Address.IP)
+	require.Equal(t, selectedAddress, iu.get("bar-svc", "selected").Address.IP)
+	require.Equal(t, selectedAddress, iu.get("boo-svc", "selected").Address.IP)
 	h.stop(t)
 }
 
 func TestSyncInstancesEvents(t *testing.T) {
-	h := setup(nil, "10.98.90.111", "")
-	// starting condition
-	require.Len(t, h.allInstances(t), 0)
+	h := setup("10.98.90.111", LOCAL)
 
 	// no services defined
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	h.si.processContainerUpdate(resetContainers(container{
+	h.addContainers(true, containerInfo{
 		ID:        "foo",
 		Image:     "foo-image:latest",
 		IPAddress: "192.168.0.67",
-	}))
-	require.Len(t, h.allInstances(t), 0)
+	})
+	h.serviceUpdates <- store.ServiceUpdate{Reset: true}
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 0)
 
-	h.AddService("foo-svc", store.Service{})
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	h.addGroup("foo-svc", "image", "foo-image")
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	require.Len(t, h.allInstances(t), 1)
+	// Add a service with a matching rule
+	h.serviceUpdates <- serviceUpdate(false, "foo-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "image", "foo-image"),
+	})
+	iu = <-h.instanceUpdates
+	require.False(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
 
-	h.addGroup("foo-svc", "image", "not-foo-image")
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	require.Len(t, h.allInstances(t), 0)
+	// Replace with a non-matching rule
+	h.serviceUpdates <- serviceUpdate(false, "foo-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "image", "not-foo-image"),
+	})
+	iu = <-h.instanceUpdates
+	require.False(t, iu.Reset)
+	require.Equal(t, map[InstanceKey]*store.Instance{
+		InstanceKey{Service: "foo-svc", Instance: "foo"}: nil,
+	}, iu.Instances)
 
-	h.si.processContainerUpdate(addContainer(container{
+	// Add some matching containers
+	h.addContainers(false, containerInfo{
 		ID:        "bar",
 		IPAddress: "192.168.34.87",
 		Image:     "not-foo-image:version",
-	}))
-	h.si.processContainerUpdate(addContainer(container{
+	}, containerInfo{
 		ID:        "baz",
 		IPAddress: "192.168.34.99",
 		Image:     "not-foo-image:version2",
-	}))
-	require.Len(t, h.allInstances(t), 2)
+	})
+	iu = <-h.instanceUpdates
+	require.False(t, iu.Reset)
+	require.Len(t, iu.Instances, 2)
 
-	h.si.processContainerUpdate(removeContainer("baz"))
-	require.Len(t, h.allInstances(t), 1)
+	// Remove a container
+	h.removeContainer("baz")
+	iu = <-h.instanceUpdates
+	require.False(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
 
-	h.RemoveService("foo-svc")
-	h.si.processServiceUpdate(<-h.serviceUpdates)
-	require.Len(t, h.allInstances(t), 0)
+	// Remove a service
+	h.serviceUpdates <- store.ServiceUpdate{
+		Services: map[string]*store.ServiceInfo{
+			"foo-svc": nil,
+		},
+	}
+	iu = <-h.instanceUpdates
+	require.False(t, iu.Reset)
+	require.Equal(t, map[InstanceKey]*store.Instance{
+		InstanceKey{Service: "foo-svc", Instance: "bar"}: nil,
+	}, iu.Instances)
+
 	h.stop(t)
 }
 
 func TestMappedPort(t *testing.T) {
-	h := setup(nil, "11.98.99.98", LOCAL)
+	h := setup("10.98.90.111", LOCAL)
 
-	h.AddService("blorp-svc", store.Service{
-		InstancePort: 8080,
+	h.serviceUpdates <- serviceUpdate(true, "blorp-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 8080},
+		ContainerRules: cris(GROUP, "image", "blorp-image"),
 	})
-	h.addGroup("blorp-svc", "image", "blorp-image")
 
-	h.si.processContainerUpdate(resetContainers(container{
+	h.addContainers(true, containerInfo{
 		ID:        "blorp-instance",
 		IPAddress: "10.13.14.15",
 		Image:     "blorp-image:tag",
 		Ports: map[string]string{
 			"8080/tcp": "3456",
 		},
-	}))
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
+	})
 
-	require.Len(t, h.allInstances(t), 1)
-	svc, err := h.GetService("blorp-svc", store.QueryServiceOptions{WithInstances: true})
-	require.Nil(t, err)
-	require.Equal(t, h.si.hostIP, svc.Instances[0].Address)
-	require.Equal(t, 3456, svc.Instances[0].Port)
-	require.Equal(t, store.LIVE, svc.Instances[0].State)
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+	require.Equal(t, &netutil.IPPort{h.hostIP, 3456}, iu.get("blorp-svc", "blorp-instance").Address)
 	h.stop(t)
 }
 
 func TestMultihostNetworking(t *testing.T) {
-	instAddress := "10.13.14.15"
+	instAddress := net.ParseIP("10.13.14.15")
 	instPort := 8080
 
-	h := setup(nil, "11.98.99.98", GLOBAL)
+	h := setup("11.98.99.98", GLOBAL)
 
-	h.AddService("blorp-svc", store.Service{
-		InstancePort: instPort,
+	h.serviceUpdates <- serviceUpdate(true, "blorp-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: instPort},
+		ContainerRules: cris(GROUP, "image", "blorp-image"),
 	})
-	h.addGroup("blorp-svc", "image", "blorp-image")
 
-	h.si.processContainerUpdate(resetContainers(container{
+	h.addContainers(true, containerInfo{
 		ID:        "blorp-instance",
-		IPAddress: instAddress,
+		IPAddress: instAddress.String(),
 		Image:     "blorp-image:tag",
 		Ports: map[string]string{
 			"8080/tcp": "3456",
 		},
-	}))
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
+	})
 
-	require.Len(t, h.allInstances(t), 1)
-	svc, err := h.GetService("blorp-svc", store.QueryServiceOptions{WithInstances: true})
-	require.Nil(t, err)
-	require.Equal(t, instAddress, svc.Instances[0].Address)
-	require.Equal(t, instPort, svc.Instances[0].Port)
-	require.Equal(t, store.LIVE, svc.Instances[0].State)
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+	require.Equal(t, &netutil.IPPort{instAddress, instPort}, iu.get("blorp-svc", "blorp-instance").Address)
 	h.stop(t)
 }
 
 func TestNoAddress(t *testing.T) {
-	h := setup(nil, "192.168.3.4", LOCAL)
+	h := setup("192.168.3.4", LOCAL)
 
-	h.AddService("important-svc", store.Service{
-		InstancePort: 80,
+	h.serviceUpdates <- serviceUpdate(true, "important-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 80},
+		ContainerRules: cris(GROUP, "image", "important-image"),
 	})
-	h.addGroup("important-svc", "image", "important-image")
 
-	h.si.processContainerUpdate(resetContainers(container{
+	h.addContainers(true, containerInfo{
 		ID:        "oops-instance",
 		IPAddress: "10.13.14.15",
 		Image:     "important-image:greatest",
 		// No published port
-	}))
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
+	})
 
-	require.Len(t, h.allInstances(t), 1)
-	svc, err := h.GetService("important-svc", store.QueryServiceOptions{WithInstances: true})
-	require.Nil(t, err)
-	require.Equal(t, "", svc.Instances[0].Address)
-	require.Equal(t, 0, svc.Instances[0].Port)
-	require.Equal(t, store.NOADDR, svc.Instances[0].State)
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+	require.Nil(t, iu.get("important-svc", "oops-instance").Address)
 	h.stop(t)
 }
 
 func TestHostNetworking(t *testing.T) {
-	h := setup(nil, "192.168.5.135", GLOBAL)
+	h := setup("192.168.5.135", GLOBAL)
 
-	h.AddService("blorp-svc", store.Service{
-		InstancePort: 8080,
+	h.serviceUpdates <- serviceUpdate(true, "blorp-svc", store.ServiceInfo{
+		Service:        store.Service{InstancePort: 8080},
+		ContainerRules: cris(GROUP, "image", "blorp-image"),
 	})
-	h.addGroup("blorp-svc", "image", "blorp-image")
 
-	h.si.processContainerUpdate(resetContainers(container{
+	h.addContainers(true, containerInfo{
 		NetworkMode: "host",
 		ID:          "blorp-instance",
 		IPAddress:   "",
 		Image:       "blorp-image:tag",
-	}))
-	h.watchServices()
-	h.si.processServiceUpdate(<-h.serviceUpdates)
+	})
 
-	require.Len(t, h.allInstances(t), 1)
-	svc, err := h.GetService("blorp-svc", store.QueryServiceOptions{WithInstances: true})
-	require.Nil(t, err)
-	require.Equal(t, h.si.hostIP, svc.Instances[0].Address)
-	require.Equal(t, 8080, svc.Instances[0].Port)
-	require.Equal(t, store.LIVE, svc.Instances[0].State)
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+	require.Equal(t, &netutil.IPPort{h.hostIP, 8080}, iu.get("blorp-svc", "blorp-instance").Address)
 	h.stop(t)
 }
 
-func TestOtherHostsEntries(t *testing.T) {
-	st := inmem.NewInMemStore()
-	h1 := setup(st, "192.168.11.34", LOCAL)
-	h2 := setup(st, "192.168.11.5", LOCAL)
+func TestSyncInstancesResets(t *testing.T) {
+	h := setup("10.98.90.111", LOCAL)
 
-	h1.AddService("foo-svc", store.Service{})
-	h1.addGroup("foo-svc", "image", "foo-image")
-	h1.si.processContainerUpdate(resetContainers(container{
-		ID:        "bar1",
-		IPAddress: "192.168.34.1",
-		Image:     "foo-image:version",
-	}, container{
-		ID:        "baz1",
-		IPAddress: "192.168.34.2",
-		Image:     "foo-image:version2",
-	}))
+	// reset signals should have been sent out initially
+	<-h.serviceUpdatesReset
+	<-h.containerUpdatesReset
 
-	h2.si.processContainerUpdate(resetContainers(container{
-		ID:        "bar2",
-		IPAddress: "192.168.34.3",
-		Image:     "foo-image:version",
-	}, container{
-		ID:        "baz2",
-		IPAddress: "192.168.34.4",
-		Image:     "foo-image:version2",
-	}))
+	// Send some initial non-reset events before the resets.
+	// These will get ignored until syncInstances has got the
+	// complete state.
+	sendService := func(reset bool, name string) {
+		h.serviceUpdates <- serviceUpdate(reset, name, store.ServiceInfo{
+			Service:        store.Service{InstancePort: 8080},
+			ContainerRules: cris(GROUP, "image", "blorp-image"),
+		})
+	}
+	sendService(false, "blorp-svc")
 
-	// let si on the first host add its instances
-	h1.watchServices()
-	h1.si.processServiceUpdate(<-h1.serviceUpdates)
-	require.Len(t, h1.allInstances(t), 2)
+	sendContainer := func(reset bool, name string) {
+		h.addContainers(reset, containerInfo{
+			ID:        name,
+			IPAddress: "10.13.14.15",
+			Image:     "blorp-image:tag",
+			Ports: map[string]string{
+				"8080/tcp": "3456",
+			},
+		})
+	}
+	sendContainer(false, "foo")
 
-	// let si on the second host add its instances
-	h2.watchServices()
-	h2.si.processServiceUpdate(<-h2.serviceUpdates)
-	require.Len(t, h1.allInstances(t), 4)
+	// Populate things
+	sendService(true, "blorp-svc")
+	sendContainer(true, "foo")
 
-	// simulate an agent restart; in the meantime, a container has
-	// stopped.
-	h2.stop(t)
-	h2 = setup(st, "192.168.11.5", LOCAL)
-	h2.si.processContainerUpdate(resetContainers(container{
-		ID:        "bar2",
-		IPAddress: "192.168.34.3",
-		Image:     "foo-image:version",
-	}))
-	h2.watchServices()
-	h2.si.processServiceUpdate(<-h2.serviceUpdates)
-	require.Len(t, h2.allInstances(t), 3)
+	iu := <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
 
-	// test behaviour when the docker listener restarts:
-	h2.si.processContainerUpdate(resetContainers())
-	require.Len(t, h2.allInstances(t), 2)
+	// Simulate a docker restart
+	sendContainer(true, "bar")
 
-	h1.stop(t)
-	h2.stop(t)
+	iu = <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+
+	// Simulate an etcd restart
+	sendService(true, "blorp-svc-2")
+
+	iu = <-h.instanceUpdates
+	require.True(t, iu.Reset)
+	require.Len(t, iu.Instances, 1)
+
+	// request another reset from downstream
+	require.Len(t, h.serviceUpdatesReset, 0)
+	require.Len(t, h.containerUpdatesReset, 0)
+	h.instanceUpdatesReset <- struct{}{}
+	<-h.serviceUpdatesReset
+	<-h.containerUpdatesReset
+
+	h.stop(t)
 }

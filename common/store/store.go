@@ -13,40 +13,44 @@ type QueryServiceOptions struct {
 	WithContainerRules bool
 }
 
-type InstanceInfo struct {
-	Name string `json:"name"`
-	Instance
-}
-
-type ContainerRuleInfo struct {
-	Name string `json:"name"`
-	ContainerRule
-}
-
 type ServiceInfo struct {
-	Name string `json:"name"`
 	Service
-	Instances      []InstanceInfo      `json:"instances,omitempty"`
-	ContainerRules []ContainerRuleInfo `json:"groups,omitempty"`
+	Instances      map[string]Instance
+	ContainerRules map[string]ContainerRule
+}
+
+type RuntimeStore interface {
+	Store
+	StartFunc() daemon.StartFunc
 }
 
 type Store interface {
-	Cluster
 	Pinger
+	Cluster
+	HostDefiner
+	HostQueryer
 	ServiceDefiner
-	InstanceDefiner
 	ServiceQueryer
-}
-
-type Cluster interface {
-	GetHosts() ([]*Host, error)
-	Heartbeat(identity string, ttl time.Duration, state *Host) error
-	DeregisterHost(identity string) error
-	WatchHosts(ctx context.Context, changes chan<- HostChange, errs daemon.ErrorSink)
+	InstanceDefiner
 }
 
 type Pinger interface {
 	Ping() error
+}
+
+type Cluster interface {
+	Heartbeat(ttl time.Duration) error
+	EndSession() error
+}
+
+type HostDefiner interface {
+	RegisterHost(identity string, details *Host) error
+	DeregisterHost(identity string) error
+}
+
+type HostQueryer interface {
+	GetHosts() ([]*Host, error)
+	WatchHosts(ctx context.Context, resCh chan<- HostChange, errorSink daemon.ErrorSink)
 }
 
 type ServiceDefiner interface {
@@ -59,25 +63,27 @@ type ServiceDefiner interface {
 	RemoveContainerRule(serviceName string, ruleName string) error
 }
 
-type InstanceDefiner interface {
-	AddInstance(serviceName, instanceName string, instance Instance) error
-	RemoveInstance(serviceName, instanceName string) error
-}
-
 type ServiceQueryer interface {
 	GetService(serviceName string, opts QueryServiceOptions) (*ServiceInfo, error)
-	GetAllServices(opts QueryServiceOptions) ([]*ServiceInfo, error)
+	GetAllServices(opts QueryServiceOptions) (map[string]*ServiceInfo, error)
 	WatchServices(ctx context.Context, resCh chan<- ServiceChange, errorSink daemon.ErrorSink, opts QueryServiceOptions)
+}
+
+type InstanceDefiner interface {
+	AddInstance(serviceName, instanceName string, details Instance) error
+	RemoveInstance(serviceName, instanceName string) error
 }
 
 // CompositeStore implements Store, and allows different concrete
 // implementations to service different parts of the interface.
 type CompositeStore struct {
-	Cluster
 	Pinger
+	Cluster
+	HostDefiner
+	HostQueryer
 	ServiceDefiner
-	InstanceDefiner
 	ServiceQueryer
+	InstanceDefiner
 }
 
 var _ Store = CompositeStore{}

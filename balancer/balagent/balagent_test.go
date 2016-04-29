@@ -3,6 +3,7 @@ package balagent
 import (
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	"path"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/weaveworks/flux/balancer/model"
 	"github.com/weaveworks/flux/common/daemon"
+	"github.com/weaveworks/flux/common/netutil"
 	"github.com/weaveworks/flux/common/store"
 	"github.com/weaveworks/flux/common/store/inmem"
 )
@@ -44,7 +46,7 @@ func newBalancerAgentConfig(t *testing.T) *BalancerAgentConfig {
 	require.Nil(t, err)
 
 	return &BalancerAgentConfig{
-		store:             inmem.NewInMemStore(),
+		store:             inmem.NewInMem().Store("test session"),
 		filename:          path.Join(dir, "output"),
 		reconnectInterval: 100 * time.Millisecond,
 		generated:         make(chan struct{}),
@@ -73,14 +75,14 @@ func TestBalancerAgent(t *testing.T) {
 	cf.template, err = tmpl.Parse(`
 {{$HOME := .Getenv "HOME"}}
 {{if len $HOME}}{{else}}No $HOME{{end}}
-{{range .}}{{.Name}}:{{range sortInsts .Instances}} ({{.Name}}, {{.IP}}:{{.Port}}){{end}}
+{{range .}}{{.Name}}:{{range sortInsts .Instances}} ({{.Name}}, {{.Address}}){{end}}
 {{end}}`)
 	require.Nil(t, err)
 
 	// Add an initial service with no instances:
 	require.Nil(t, cf.store.AddService("service1", store.Service{
 		Protocol: "http",
-		Address:  "1.2.3.4",
+		Address:  &netutil.IPPort{net.ParseIP("1.2.3.4"), 80},
 	}))
 
 	comp, errs := cf.start(t)
@@ -89,20 +91,19 @@ func TestBalancerAgent(t *testing.T) {
 
 	// Add an instance to the service:
 	require.Nil(t, cf.store.AddInstance("service1", "inst1",
-		store.Instance{State: store.LIVE, Address: "5.6.7.8", Port: 1}))
+		store.Instance{Address: &netutil.IPPort{net.ParseIP("5.6.7.8"), 1}}))
 	<-cf.generated
 	requireFile(t, cf.filename, "service1: (inst1, 5.6.7.8:1)")
 
 	// And another instance:
 	require.Nil(t, cf.store.AddInstance("service1", "inst2",
-		store.Instance{State: store.LIVE, Address: "9.10.11.12", Port: 2}))
+		store.Instance{Address: &netutil.IPPort{net.ParseIP("9.10.11.12"), 2}}))
 	<-cf.generated
 	requireFile(t, cf.filename, "service1: (inst1, 5.6.7.8:1) (inst2, 9.10.11.12:2)")
 
 	// Add another service:
 	require.Nil(t, cf.store.AddService("service2", store.Service{
 		Protocol: "http",
-		Address:  "13.14.15.16",
 	}))
 	<-cf.generated
 	requireFile(t, cf.filename, `service1: (inst1, 5.6.7.8:1) (inst2, 9.10.11.12:2)
@@ -140,7 +141,7 @@ func TestBadTemplate(t *testing.T) {
 	// Add an initial service with no instances:
 	require.Nil(t, cf.store.AddService("service1", store.Service{
 		Protocol: "http",
-		Address:  "1.2.3.4",
+		Address:  &netutil.IPPort{net.ParseIP("1.2.3.4"), 80},
 	}))
 
 	comp, errs := cf.start(t)
@@ -159,7 +160,7 @@ func TestReloadCmd(t *testing.T) {
 
 	require.Nil(t, cf.store.AddService("service1", store.Service{
 		Protocol: "http",
-		Address:  "1.2.3.4",
+		Address:  &netutil.IPPort{net.ParseIP("1.2.3.4"), 90},
 	}))
 
 	tmp := cf.filename + "-copy"

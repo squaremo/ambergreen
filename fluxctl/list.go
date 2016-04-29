@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"text/template"
 
 	"github.com/spf13/cobra"
@@ -17,6 +18,12 @@ type listOpts struct {
 	verbose    bool
 }
 
+const defaultFormat = "{{.Name}}"
+const defaultVerboseFormat = `{{.Name}}{{if .Address}}
+  Address: {{.Address}}{{end}}{{if (ne .InstancePort 0)}}
+  Instance port: {{.InstancePort}}{{end}}{{if .Protocol}}
+  Protocol: {{.Protocol}}{{end}}`
+
 func (opts *listOpts) makeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -30,64 +37,95 @@ func (opts *listOpts) makeCommand() *cobra.Command {
 	return cmd
 }
 
+type serviceInfo struct {
+	Name string `json:"name"`
+	*store.ServiceInfo
+}
+
 type ruleInfo struct {
 	Service string `json:"service"`
-	*store.ContainerRuleInfo
+	Name    string `json:"name"`
+	store.ContainerRule
 }
 
 func (opts *listOpts) run(_ *cobra.Command, args []string) error {
-	printService := func(s *store.ServiceInfo) error {
-		fmt.Fprintln(opts.getStdout(), s.Name)
-		return nil
-	}
-	if opts.format != "" {
-		tmpl := template.Must(template.New("service").Funcs(extraTemplateFuncs).Parse(opts.format))
-		printService = func(info *store.ServiceInfo) error {
-			err := tmpl.Execute(opts.getStdout(), info)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintln(opts.getStdout())
-			return nil
+	format := opts.format
+	if format == "" {
+		format = defaultFormat
+		if opts.verbose {
+			format = defaultVerboseFormat
 		}
 	}
+
+	tmpl := template.Must(template.New("service").Funcs(extraTemplateFuncs).Parse(format))
 
 	if opts.formatRule != "" {
 		opts.verbose = true
 	} else {
-		opts.formatRule = `  {{.Name}} {{json .Selector}}`
+		opts.formatRule = "  Rule: {{.Name}} {{json .Selector}}"
 	}
 
-	var printRule func(serviceName string, rule *store.ContainerRuleInfo)
+	var ruleTmpl *template.Template
 	if opts.verbose {
-		tmpl := template.Must(template.New("rule").Funcs(extraTemplateFuncs).Parse(opts.formatRule))
-		printRule = func(serviceName string, rule *store.ContainerRuleInfo) {
-			var info ruleInfo
-			info.ContainerRuleInfo = rule
-			info.Service = serviceName
-			err := tmpl.Execute(opts.getStdout(), info)
-			if err != nil {
-				panic(err)
-			}
-			fmt.Fprintln(opts.getStdout())
-		}
+		ruleTmpl = template.Must(template.New("rule").Funcs(extraTemplateFuncs).Parse(opts.formatRule))
 	}
 
 	svcs, err := opts.store.GetAllServices(store.QueryServiceOptions{WithContainerRules: opts.verbose})
 	if err != nil {
 		return fmt.Errorf("Unable to enumerate services: %s", err)
 	}
-	for _, service := range svcs {
-		printService(service)
-		if opts.verbose {
-			rules := service.ContainerRules
+	for svcName, service := range svcs {
+		err := executeTemplate(tmpl, opts.getStdout(), serviceInfo{
+			Name:        svcName,
+			ServiceInfo: service,
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		if ruleTmpl == nil {
+			continue
+		}
+
+		for ruleName, rule := range service.ContainerRules {
+			err := executeTemplate(ruleTmpl, opts.getStdout(), ruleInfo{
+				Service:       svcName,
+				Name:          ruleName,
+				ContainerRule: rule,
+			})
 			if err != nil {
 				panic(err)
 			}
-			for _, rule := range rules {
-				printRule(service.Name, &rule)
-			}
 		}
 	}
+
 	return nil
+}
+
+// Execute a template, making sure the result ends in a newline
+func executeTemplate(tmpl *template.Template, wr io.Writer, data interface{}) error {
+	enw := ensureNewlineWriter{wr, false}
+	if err := tmpl.Execute(&enw, data); err != nil {
+		return err
+	}
+	return enw.finish()
+}
+
+type ensureNewlineWriter struct {
+	wr      io.Writer
+	newline bool
+}
+
+func (enw *ensureNewlineWriter) Write(p []byte) (n int, err error) {
+	if len(p) > 0 {
+		enw.newline = (p[len(p)-1] == '\n')
+	}
+	return enw.wr.Write(p)
+}
+
+func (enw *ensureNewlineWriter) finish() (err error) {
+	if !enw.newline {
+		_, err = enw.wr.Write([]byte{'\n'})
+	}
+	return
 }

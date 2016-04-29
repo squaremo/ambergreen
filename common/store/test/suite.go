@@ -1,6 +1,7 @@
 package test
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/weaveworks/flux/common/daemon"
+	"github.com/weaveworks/flux/common/netutil"
 	"github.com/weaveworks/flux/common/store"
 )
 
@@ -39,8 +41,7 @@ func testPing(s store.Store, t *testing.T) {
 }
 
 var testService = store.Service{
-	Address:  "1.2.3.4",
-	Port:     1234,
+	Address:  &netutil.IPPort{net.ParseIP("1.2.3.4"), 1234},
 	Protocol: "tcp",
 }
 
@@ -48,7 +49,6 @@ func testServices(s store.Store, t *testing.T) {
 	require.Nil(t, s.AddService("svc", testService))
 	svc2, err := s.GetService("svc", store.QueryServiceOptions{})
 	require.Nil(t, err)
-	require.Equal(t, "svc", svc2.Name)
 	require.Equal(t, testService, svc2.Service)
 
 	require.Nil(t, s.CheckRegisteredService("svc"))
@@ -57,8 +57,8 @@ func testServices(s store.Store, t *testing.T) {
 		svcs := make(map[string]store.Service)
 		ss, err := s.GetAllServices(store.QueryServiceOptions{})
 		require.Nil(t, err)
-		for _, svc := range ss {
-			svcs[svc.Name] = svc.Service
+		for name, svc := range ss {
+			svcs[name] = svc.Service
 		}
 		return svcs
 	}
@@ -86,11 +86,8 @@ func testRules(s store.Store, t *testing.T) {
 	svc, err := s.GetService("svc", store.QueryServiceOptions{WithContainerRules: true})
 	require.Nil(t, err)
 
-	require.Equal(t, []store.ContainerRuleInfo{
-		store.ContainerRuleInfo{
-			Name:          "group",
-			ContainerRule: testRule,
-		},
+	require.Equal(t, map[string]store.ContainerRule{
+		"group": testRule,
 	}, svc.ContainerRules)
 
 	require.Nil(t, s.RemoveContainerRule("svc", "group"))
@@ -101,24 +98,19 @@ func testRules(s store.Store, t *testing.T) {
 
 var testInst = store.Instance{
 	ContainerRule: "group",
-	Address:       "1.2.3.4",
-	Port:          12345,
+	Address:       &netutil.IPPort{net.ParseIP("1.2.3.4"), 12345},
 	Labels:        map[string]string{"key": "val"},
 }
 
 func testInstances(s store.Store, t *testing.T) {
+	s.Heartbeat(10 * time.Second)
 	require.Nil(t, s.AddService("svc", testService))
 	require.Nil(t, s.AddInstance("svc", "inst", testInst))
 
 	instances := func() map[string]store.Instance {
 		svc, err := s.GetService("svc", store.QueryServiceOptions{WithInstances: true})
 		require.Nil(t, err)
-
-		insts := make(map[string]store.Instance)
-		for _, inst := range svc.Instances {
-			insts[inst.Name] = inst.Instance
-		}
-		return insts
+		return svc.Instances
 	}
 
 	require.Equal(t, map[string]store.Instance{"inst": testInst}, instances())
@@ -128,9 +120,9 @@ func testInstances(s store.Store, t *testing.T) {
 		require.Nil(t, err)
 
 		insts := make(map[string]store.Instance)
-		for _, svc := range svcs {
-			for _, inst := range svc.Instances {
-				insts[svc.Name+" "+inst.Name] = inst.Instance
+		for svcName, svc := range svcs {
+			for instName, inst := range svc.Instances {
+				insts[svcName+" "+instName] = inst
 			}
 		}
 		return insts
@@ -141,6 +133,12 @@ func testInstances(s store.Store, t *testing.T) {
 	require.Nil(t, s.RemoveInstance("svc", "inst"))
 	require.Equal(t, map[string]store.Instance{}, instances())
 	require.Equal(t, map[string]store.Instance{}, serviceInstances())
+
+	// Instances disappear with the session
+	require.Nil(t, s.AddInstance("svc", "inst", testInst))
+	require.Equal(t, map[string]store.Instance{"svc inst": testInst}, serviceInstances())
+	s.EndSession()
+	require.Equal(t, map[string]store.Instance{}, instances())
 }
 
 type watch struct {
@@ -253,10 +251,9 @@ func testWatchServices(s store.Store, t *testing.T) {
 
 func testHosts(ts TestableStore, t *testing.T) {
 	hostID := "foo host"
-	hostData := &store.Host{
-		IPAddress: "192.168.1.65",
-	}
-	err := ts.Heartbeat(hostID, 60*time.Second, hostData)
+	hostData := &store.Host{IP: net.ParseIP("192.168.1.65")}
+	ts.Heartbeat(10 * time.Second) // hosts depend on the session
+	err := ts.RegisterHost(hostID, hostData)
 	require.Nil(t, err)
 	hosts, err := ts.GetHosts()
 	require.Nil(t, err)
@@ -264,6 +261,17 @@ func testHosts(ts TestableStore, t *testing.T) {
 	require.Equal(t, hosts[0], hostData)
 	err = ts.DeregisterHost(hostID)
 	require.Nil(t, err)
+	hosts, err = ts.GetHosts()
+	require.Nil(t, err)
+	require.Len(t, hosts, 0)
+
+	err = ts.RegisterHost(hostID, hostData)
+	require.Nil(t, err)
+	hosts, err = ts.GetHosts()
+	require.Nil(t, err)
+	require.Len(t, hosts, 1)
+	require.Equal(t, hosts[0], hostData)
+	ts.EndSession()
 	hosts, err = ts.GetHosts()
 	require.Nil(t, err)
 	require.Len(t, hosts, 0)
@@ -309,18 +317,12 @@ func testHostWatch(ts TestableStore, t *testing.T) {
 
 	hostID := "host number three"
 	check(func(w *hostWatch) {
-		require.Nil(t, ts.Heartbeat(hostID, 5*time.Second, &store.Host{}))
+		require.Nil(t, ts.Heartbeat(5*time.Second))
+		require.Nil(t, ts.RegisterHost(hostID, &store.Host{IP: net.ParseIP("192.168.3.89")}))
 		require.Nil(t, ts.DeregisterHost(hostID))
-	},
-		store.HostChange{Name: hostID, HostDeparted: false},
-		store.HostChange{Name: hostID, HostDeparted: true})
+	}, store.HostChange{hostID, false}, store.HostChange{hostID, true})
 	ts.Reset(t)
 
-	hostID = "another host"
-	check(func(w *hostWatch) {
-		ts.Heartbeat(hostID, 1*time.Second, &store.Host{})
-		time.Sleep(2*time.Second + 200*time.Millisecond)
-	}, store.HostChange{hostID, false}, store.HostChange{hostID, true})
 	hosts, err := ts.GetHosts()
 	require.Nil(t, err)
 	require.Len(t, hosts, 0)

@@ -3,41 +3,31 @@ package model
 import (
 	"bytes"
 	"fmt"
-	"net"
+
+	"github.com/weaveworks/flux/common/netutil"
 )
 
 type Instance struct {
-	Name  string
-	Group string
-	IP    net.IP
-	Port  int
-}
-
-func (inst *Instance) TCPAddr() *net.TCPAddr {
-	return &net.TCPAddr{IP: inst.IP, Port: inst.Port}
+	Name    string
+	Address netutil.IPPort
 }
 
 type Service struct {
 	Name string
 	// Protocol, e.g. "http".  "" for simple tcp forwarding.
 	Protocol  string
-	IP        net.IP
-	Port      int
+	Address   *netutil.IPPort
 	Instances []Instance
-}
-
-func (svc *Service) TCPAddr() *net.TCPAddr {
-	return &net.TCPAddr{IP: svc.IP, Port: svc.Port}
 }
 
 func (svc *Service) Summary() string {
 	var buf bytes.Buffer
 
-	fmt.Fprintf(&buf, "%s %s/%s {", svc.Name, svc.TCPAddr(), svc.Protocol)
+	fmt.Fprintf(&buf, "%s %s/%s {", svc.Name, svc.Address, svc.Protocol)
 
 	comma := ""
 	for _, inst := range svc.Instances {
-		fmt.Fprintf(&buf, "%s%s(%s) %s", comma, inst.Name, inst.Group, inst.TCPAddr())
+		fmt.Fprintf(&buf, "%s%s %s", comma, inst.Name, inst.Address)
 		comma = ", "
 	}
 
@@ -46,19 +36,20 @@ func (svc *Service) Summary() string {
 }
 
 func (a *Service) Equal(b *Service) bool {
-	if a.Name != b.Name || a.Protocol != b.Protocol || a.Port != b.Port || !a.IP.Equal(b.IP) {
+	if a.Name != b.Name || a.Protocol != b.Protocol ||
+		(a.Address == nil) != (b.Address == nil) ||
+		!a.Address.Equal(*b.Address) {
 		return false
 	}
 
 	type instKey struct {
-		name  string
-		group string
-		ip    string
-		port  int
+		name string
+		ip   string
+		port int
 	}
 
 	key := func(i *Instance) instKey {
-		return instKey{i.Name, i.Group, string(i.IP), i.Port}
+		return instKey{i.Name, string(i.Address.IP), i.Address.Port}
 	}
 
 	m := make(map[instKey]struct{})
