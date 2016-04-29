@@ -31,21 +31,25 @@ func (p *serviceParser) next() bool {
 	// We enter this function with p.index pointing at a service key. We leave
 	// this function when p.index points at a different service key (or EOF).
 	// Assume that KV order is service key, then other related keys.
-	p.curr = store.ServiceInfo{}
+	p.name = ""
+	p.curr = store.ServiceInfo{
+		Instances:      map[string]store.Instance{},
+		ContainerRules: map[string]store.ContainerRule{},
+	}
 	for ; p.index < len(p.resp.Kvs); p.index++ {
 		// Assumes resp.Kvs order is service key, then other keys.
 		if serviceName, ok := parseServiceKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != "" { // we already parsed a service key, so this is a new one
+			if p.name != "" { // we already parsed a service key, so this is a new one
 				return true // yield the ServiceInfo to the caller
 			}
-			p.curr.Name = serviceName
+			p.name = serviceName
 			if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &p.curr.Service); err != nil {
 				p.er = err
 				return false
 			}
 		} else if serviceName, instanceName, ok := parseInstanceKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
+			if p.name != serviceName {
+				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.name, serviceName)
 				return false
 			}
 			if p.opts.WithInstances {
@@ -54,14 +58,11 @@ func (p *serviceParser) next() bool {
 					p.er = err
 					return false
 				}
-				p.curr.Instances = append(p.curr.Instances, store.InstanceInfo{
-					Name:     instanceName,
-					Instance: instance,
-				})
+				p.curr.Instances[instanceName] = instance
 			}
 		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(p.resp.Kvs[p.index].Key); ok {
-			if p.curr.Name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.curr.Name, serviceName)
+			if p.name != serviceName {
+				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.name, serviceName)
 				return false
 			}
 			if p.opts.WithContainerRules {
@@ -70,10 +71,7 @@ func (p *serviceParser) next() bool {
 					p.er = err
 					return false
 				}
-				p.curr.ContainerRules = append(p.curr.ContainerRules, store.ContainerRuleInfo{
-					Name:          containerRuleName,
-					ContainerRule: containerRule,
-				})
+				p.curr.ContainerRules[containerRuleName] = containerRule
 			}
 		} else {
 			p.er = fmt.Errorf("unknown key %q", p.resp.Kvs[p.index].Key)
@@ -81,15 +79,15 @@ func (p *serviceParser) next() bool {
 		}
 	}
 	// Special case: we just had one service
-	if p.curr.Name != "" {
+	if p.name != "" {
 		return true
 	}
 	// Regular case: no more to parse
 	return false
 }
 
-func (p *serviceParser) service() store.ServiceInfo {
-	return p.curr
+func (p *serviceParser) service() (string, store.ServiceInfo) {
+	return p.name, p.curr
 }
 
 func (p *serviceParser) err() error {

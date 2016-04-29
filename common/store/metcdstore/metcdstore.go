@@ -60,16 +60,20 @@ func (s *metcdStore) GetHosts() ([]*store.Host, error) {
 	return hosts, nil
 }
 
-func (s *metcdStore) Heartbeat(identity string, ttl time.Duration, state *store.Host) error {
-	buf, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
+func (s *metcdStore) Heartbeat(ttl time.Duration) error {
 	// TODO(pb): metcd must support LeaseServer
-	_, err = s.server.Put(s.ctx, &etcdserverpb.PutRequest{
-		Key:   hostKey(identity),
-		Value: buf,
-		//Lease: lease,
+	// TODO(pb): see Heartbeat in etcdstore
+	return errors.New("not implemented")
+}
+
+func (s *metcdStore) EndSession() error {
+	return errors.New("not implemented")
+}
+
+func (s *metcdStore) RegisterHost(identity string, details *store.Host) error {
+	_, err := s.server.Put(s.ctx, &etcdserverpb.PutRequest{
+		Key: hostKey(identity),
+		// Value: sessionHost{...} // TODO(pb)
 	})
 	return err
 }
@@ -196,11 +200,11 @@ func (s *metcdStore) GetService(serviceName string, opts store.QueryServiceOptio
 	if !p.next() {
 		return nil, fmt.Errorf("failed to parse a service: %v", p.err())
 	}
-	service := p.service()
+	_, service := p.service()
 	return &service, nil
 }
 
-func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.ServiceInfo, error) {
+func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) (map[string]*store.ServiceInfo, error) {
 	key := []byte(serviceRoot)
 	resp, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
 		Key:      key,
@@ -209,11 +213,11 @@ func (s *metcdStore) GetAllServices(opts store.QueryServiceOptions) ([]*store.Se
 	if err != nil {
 		return nil, err
 	}
-	var services []*store.ServiceInfo
+	services := map[string]*store.ServiceInfo{}
 	p := newServiceParser(resp, opts)
 	for p.next() {
-		service := p.service()
-		services = append(services, &service)
+		name, service := p.service()
+		services[name] = &service // TODO(pb)
 	}
 	if err := p.err(); err != nil {
 		return nil, err
