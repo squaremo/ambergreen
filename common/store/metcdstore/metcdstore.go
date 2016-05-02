@@ -1,6 +1,8 @@
 package metcdstore
 
 import (
+	"crypto/rand"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,24 +23,32 @@ func New(ctx context.Context, minPeerCount int, logger mesh.Logger) store.Store 
 	terminatec := make(chan struct{})
 	terminatedc := make(chan error)
 	return &metcdStore{
-		ctx:    ctx,
-		server: metcd.NewDefaultServer(minPeerCount, terminatec, terminatedc, logger),
-		logger: logger,
+		ctx:     ctx,
+		server:  metcd.NewDefaultServer(minPeerCount, terminatec, terminatedc, logger),
+		session: makeSessionID(),
+		logger:  logger,
 	}
 }
 
 type metcdStore struct {
-	ctx    context.Context
-	server metcd.Server
-	logger mesh.Logger
+	ctx     context.Context
+	server  metcd.Server
+	session string
+	logger  mesh.Logger
 }
 
 // ErrNotFound indicates an entity was not found.
 var ErrNotFound = errors.New("not found")
 
-// The store.Cluster methods provide an interface for clients to register (via
-// Heartbeat) and deregister hosts. Hosts are logical collections of entities, a
-// convenient abstraction for when a node dies and takes many things with it.
+func makeSessionID() string {
+	bytes := make([]byte, 160/8)
+	rand.Read(bytes)
+	return base32.HexEncoding.EncodeToString(bytes)
+}
+
+// The store.Cluster methods provide an interface for clients to register and
+// deregister hosts. Hosts are logical collections of entities, a convenient
+// abstraction for when a node dies and takes many things with it.
 
 func (s *metcdStore) GetHosts() ([]*store.Host, error) {
 	key := []byte(hostRoot)
@@ -67,7 +77,10 @@ func (s *metcdStore) Heartbeat(ttl time.Duration) error {
 }
 
 func (s *metcdStore) EndSession() error {
-	return errors.New("not implemented")
+	_, err := s.server.DeleteRange(s.ctx, &etcdserverpb.DeleteRangeRequest{
+		Key: sessionKey(s.session),
+	})
+	return err
 }
 
 func (s *metcdStore) RegisterHost(identity string, details *store.Host) error {
@@ -90,7 +103,13 @@ func (s *metcdStore) WatchHosts(ctx context.Context, changes chan<- store.HostCh
 }
 
 func (s *metcdStore) Ping() error {
-	return errors.New("not implemented") // TODO(pb)
+	// There's no remote connectivity involved in metcd, so we're kind of
+	// fudging the definition of ping. But this will tell you something.
+	_, err := s.server.Range(s.ctx, &etcdserverpb.RangeRequest{
+		Key:   []byte{},
+		Limit: 1,
+	})
+	return err
 }
 
 func (s *metcdStore) CheckRegisteredService(serviceName string) error {

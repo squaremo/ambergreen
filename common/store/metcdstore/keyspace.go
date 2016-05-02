@@ -6,6 +6,7 @@ const (
 	root        = "/weave-flux/"
 	serviceRoot = root + "service/"
 	hostRoot    = root + "host/"
+	sessionRoot = root + "session/"
 )
 
 func serviceRootKey(serviceName string) []byte {
@@ -26,4 +27,8 @@ func instanceKey(serviceName, instanceName string) []byte {
 
 func hostKey(identity string) []byte {
 	return []byte(fmt.Sprintf("%s%s", hostRoot, identity))
+}
+
+func sessionKey(id string) []byte {
+	return []byte(fmt.Sprintf("%s%s", sessionRoot, id))
 }

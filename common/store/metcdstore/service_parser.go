@@ -10,7 +10,9 @@ import (
 	"github.com/weaveworks/flux/common/store"
 )
 
-// In the style of bufio.Scanner.
+// In the style of bufio.Scanner, serviceParser parses an etcd v3 RangeResponse
+// (i.e. a get) on a service key. It will extract store.ServiceInfo structs,
+// including instances and container rules, if they are requested.
 type serviceParser struct {
 	resp  *etcdserverpb.RangeResponse
 	opts  store.QueryServiceOptions
@@ -30,7 +32,6 @@ func newServiceParser(resp *etcdserverpb.RangeResponse, opts store.QueryServiceO
 func (p *serviceParser) next() bool {
 	// We enter this function with p.index pointing at a service key. We leave
 	// this function when p.index points at a different service key (or EOF).
-	// Assume that KV order is service key, then other related keys.
 	p.name = ""
 	p.curr = store.ServiceInfo{
 		Instances:      map[string]store.Instance{},
@@ -38,43 +39,44 @@ func (p *serviceParser) next() bool {
 	}
 	for ; p.index < len(p.resp.Kvs); p.index++ {
 		// Assumes resp.Kvs order is service key, then other keys.
-		if serviceName, ok := parseServiceKey(p.resp.Kvs[p.index].Key); ok {
+		kv := p.resp.Kvs[p.index]
+		if serviceName, ok := parseServiceKey(kv.Key); ok {
 			if p.name != "" { // we already parsed a service key, so this is a new one
 				return true // yield the ServiceInfo to the caller
 			}
 			p.name = serviceName
-			if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &p.curr.Service); err != nil {
+			if err := json.Unmarshal(kv.Value, &p.curr.Service); err != nil {
 				p.er = err
 				return false
 			}
-		} else if serviceName, instanceName, ok := parseInstanceKey(p.resp.Kvs[p.index].Key); ok {
+		} else if serviceName, instanceName, ok := parseInstanceKey(kv.Key); ok {
 			if p.name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.name, serviceName)
+				p.er = fmt.Errorf("inconsistent service names when parsing instance: %q, %q", p.name, serviceName)
 				return false
 			}
 			if p.opts.WithInstances {
 				var instance store.Instance
-				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &instance); err != nil {
+				if err := json.Unmarshal(kv.Value, &instance); err != nil {
 					p.er = err
 					return false
 				}
 				p.curr.Instances[instanceName] = instance
 			}
-		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(p.resp.Kvs[p.index].Key); ok {
+		} else if serviceName, containerRuleName, ok := parseContainerRuleKey(kv.Key); ok {
 			if p.name != serviceName {
-				p.er = fmt.Errorf("inconsistent service names: %q, %q", p.name, serviceName)
+				p.er = fmt.Errorf("inconsistent service names when parsing container rule: %q, %q", p.name, serviceName)
 				return false
 			}
 			if p.opts.WithContainerRules {
 				var containerRule store.ContainerRule
-				if err := json.Unmarshal(p.resp.Kvs[p.index].Value, &containerRule); err != nil {
+				if err := json.Unmarshal(kv.Value, &containerRule); err != nil {
 					p.er = err
 					return false
 				}
 				p.curr.ContainerRules[containerRuleName] = containerRule
 			}
 		} else {
-			p.er = fmt.Errorf("unknown key %q", p.resp.Kvs[p.index].Key)
+			p.er = fmt.Errorf("unknown key %q", kv.Key)
 			return false
 		}
 	}
